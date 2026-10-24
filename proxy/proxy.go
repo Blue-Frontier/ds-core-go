@@ -59,11 +59,15 @@ func New(cfg *config.Config, ca *certcache.Authority, log *slog.Logger) (*Server
 		log = slog.Default()
 	}
 	return &Server{
-		Table:       table,
-		CA:          ca,
-		DNS:         dnsres.New(&cfg.Server, dnsres.WithLogger(log)),
-		Log:         log,
-		DialTimeout: 10 * time.Second,
+		Table: table,
+		CA:    ca,
+		DNS:   dnsres.New(&cfg.Server, dnsres.WithLogger(log)),
+		Log:   log,
+		// DialTimeout bounds the TCP connect (and per-candidate TLS handshake)
+		// to the origin: 5s so blocked IPs fail fast and the working candidate
+		// is reached within the client's patience; failures sink to the tail
+		// via DNS.Note and good IPs lead on later connections.
+		DialTimeout: 5 * time.Second,
 	}, nil
 }
 
