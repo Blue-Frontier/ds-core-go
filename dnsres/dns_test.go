@@ -21,6 +21,42 @@ func UDPProviderConf(t *testing.T, cfg testConfig) (string, *config.DNSProvider)
 	return addr, &config.DNSProvider{Server: host, Port: atoi(port)}
 }
 
+// TestUnmappedHostGoesStraightToSystem: a host without preset or mapping must
+// not pay the latency of trying providers *before* the system DNS (the phone
+// smoke showed a quad9 timeout tax before the fix). Only after a real system
+// failure do the providers join as the fallback.
+func TestUnmappedHostGoesStraightToSystem(t *testing.T) {
+	_, udp := UDPProviderConf(t, testConfig{replyA: []string{"192.0.2.9"}})
+	s := &config.Server{
+		DNS: config.DNS{
+			Providers: map[string]*config.DNSProvider{"unit": udp},
+		},
+	}
+	r := testResolver(t, s)
+	ctx := context.Background()
+
+	// The system resolver answers for this name below, so the provider must
+	// never be consulted.
+	if ips, err := r.Lookup(ctx, "localhost"); err != nil || len(ips) == 0 {
+		t.Fatalf("system lookup of localhost: %v %v", ips, err)
+	}
+	if p := r.providers["unit"]; p.counted() != 0 {
+		t.Fatalf("unmapped host touched its provider %d times", p.counted())
+	}
+
+	// A name the system resolver cannot answer falls back to the provider.
+	ips, err := r.Lookup(ctx, "unmapped.invalid")
+	if err != nil {
+		t.Fatalf("fallback to provider: %v", err)
+	}
+	if len(ips) != 1 || ips[0].String() != "192.0.2.9" {
+		t.Fatalf("fallback ips = %v", ips)
+	}
+	if p := r.providers["unit"]; p.counted() != 1 {
+		t.Fatalf("provider fallback uses = %d, want 1", p.counted())
+	}
+}
+
 // TestProviderUDP answers through the canned UDP server and honors the
 // mapping family.
 func TestProviderUDP(t *testing.T) {

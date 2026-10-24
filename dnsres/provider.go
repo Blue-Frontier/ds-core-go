@@ -85,6 +85,16 @@ type Provider struct {
 	doh *dohClient
 
 	mu sync.Mutex
+
+	transportQueries int // test observability: transport hits (guarded by mu)
+}
+
+// counted reports how many real transport queries this provider served.
+// Test-only observability; cheap enough to keep in production.
+func (p *Provider) counted() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.transportQueries
 }
 
 // newProvider builds one provider from its configuration; (nil, nil) marks a
@@ -281,6 +291,10 @@ func (p *Provider) queryTransport(ctx context.Context, host string, family int) 
 		// trailing hostname item (desktop DNSOverPreSetIpList._lookup).
 		return nil, nil
 	}
+
+	p.mu.Lock()
+	p.transportQueries++
+	p.mu.Unlock()
 
 	qtype := uint16(typeA)
 	if family == 6 {

@@ -225,7 +225,10 @@ func (r *Resolver) Preset(host string) bool {
 	return r.presetIdx.matchList(hostmatch.Normalize(host)) != nil
 }
 
-// resolve walks the selection chain.
+// resolve walks the selection chain. Hosts without preset/mapping go straight
+// to the system DNS (desktop createDefaultLookupFunc); providers only join as
+// a real fallback after the primary station failed, never as a latency tax in
+// front of every plain lookup.
 func (r *Resolver) resolve(ctx context.Context, host string, forSNI bool) ([]net.IP, error) {
 	h := hostmatch.Normalize(host)
 	if h == "" {
@@ -235,36 +238,67 @@ func (r *Resolver) resolve(ctx context.Context, host string, forSNI bool) ([]net
 		return []net.IP{ip}, nil
 	}
 
+	primary := r.primary(h)
 	if forSNI {
 		// Preset and mapping still win (desktop getDNSAndFamily runs before
 		// the SNI fallback); ForSNI fills the gap for uncovered hosts.
-		if ips := r.viaProvider(ctx, r.primary(h), h, 0); len(ips) > 0 {
-			return ips, nil
+		route := primary
+		if route == nil {
+			route = r.forSNI
 		}
-		if r.forSNI != nil && r.forSNI != r.primary(h) {
-			if ips := r.viaProvider(ctx, r.forSNI, h, 0); len(ips) > 0 {
+		if route != nil {
+			if ips := r.viaProvider(ctx, route, h, 0); len(ips) > 0 {
 				return ips, nil
 			}
 		}
-		return r.systemLookup(ctx, h)
+		if route == r.preset || route == nil {
+			return r.systemLookup(ctx, h)
+		}
+		return r.remainingProvidersAndSystem(ctx, h, route), nil
 	}
 
-	if ips := r.viaProvider(ctx, r.primary(h), h, 0); len(ips) > 0 {
+	if primary != nil {
+		if ips := r.viaProvider(ctx, primary, h, 0); len(ips) > 0 {
+			return ips, nil
+		}
+		return r.remainingProvidersAndSystem(ctx, h, primary), nil
+	}
+	// No preset, no mapping: system DNS first; its result feeds the caller
+	// directly. Only chances of real failure trigger provider attempts.
+	ips, err := r.systemLookup(ctx, h)
+	if err == nil && len(ips) > 0 {
 		return ips, nil
 	}
-	// Primary answered empty (or no mapping): try the remaining providers
-	// once (desktop getFallbackDnsList, minus PreSet), then the system DNS.
-	primary := r.primary(h)
 	for _, name := range r.order {
 		p := r.providers[name]
-		if p == nil || p == primary {
-			continue
-		}
 		if ips := r.viaProvider(ctx, p, h, 0); len(ips) > 0 {
 			return ips, nil
 		}
 	}
-	return r.systemLookup(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("resolve %s: no addresses", h)
+}
+
+// remainingProvidersAndSystem tries every provider except the one already
+// attempted (desktop getFallbackDnsList minus PreSet), then the system DNS.
+func (r *Resolver) remainingProvidersAndSystem(ctx context.Context, h string, tried *Provider) []net.IP {
+	for _, name := range r.order {
+		p := r.providers[name]
+		if p == nil || p == tried {
+			continue
+		}
+		if ips := r.viaProvider(ctx, p, h, 0); len(ips) > 0 {
+			return ips
+		}
+	}
+	ips, err := r.systemLookup(ctx, h)
+	if err != nil {
+		r.log.Debug("dnsres: system fallback failed", "host", h, "err", err)
+		return nil
+	}
+	return ips
 }
 
 // primary picks preset → mapped provider, or nil (system DNS).

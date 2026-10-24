@@ -66,12 +66,19 @@ func dnsWireResponse(pkg []byte, cfg testConfig) []byte {
 
 // startFakeUDPDNS serves canned answers over UDP.
 func startFakeUDPDNS(t *testing.T, cfg testConfig) string {
+	pc, _ := startFakeUDPDNSCounted(t, cfg)
+	return pc
+}
+
+// startFakeUDPDNSCounted additionally reports how many queries it answered.
+func startFakeUDPDNSCounted(t *testing.T, cfg testConfig) (addr string, count func() int) {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("udp listen: %v", err)
 	}
 	t.Cleanup(func() { pc.Close() })
+	var requests int
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -79,10 +86,11 @@ func startFakeUDPDNS(t *testing.T, cfg testConfig) string {
 			if err != nil {
 				return
 			}
+			requests++
 			_, _ = pc.WriteTo(dnsWireResponse(buf[:n], cfg), raddr)
 		}
 	}()
-	return pc.LocalAddr().String()
+	return pc.LocalAddr().String(), func() int { return requests }
 }
 
 // startFakeTCPDNS serves canned answers over plain TCP, joined host:port.
