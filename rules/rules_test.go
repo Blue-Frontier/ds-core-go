@@ -10,7 +10,7 @@ func sampleRules() map[string]map[string]config.Rule {
 	return map[string]map[string]config.Rule{
 		"github.com": {
 			`^(/[^/]+){2}/releases/download/.*$`: {Redirect: "ghp.ci/https://github.com"},
-			`.*`: {SNI: "baidu.com"},
+			`.*`:                                 {SNI: "baidu.com"},
 		},
 		"www.gstatic.com": {
 			`/recaptcha/.*`: {Proxy: "www.recaptcha.net"},
