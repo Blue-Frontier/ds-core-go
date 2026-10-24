@@ -246,64 +246,135 @@ func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, ac
 		return nil, err
 	}
 
+	// Race dial: GFW-dropped addresses sit ahead of reachable ones in fresh
+	// lists, and serial dialing spends 5s on each before reaching them -
+	// past the client's patience. Dial+TLS one batch at a time in parallel
+	// and take the first usable connection; failures are reported to the
+	// DNS preference (they sink to the tail) as usual.
+	const batchSize = 6
+	for start := 0; start < len(ips); start += batchSize {
+		end := start + batchSize
+		if end > len(ips) {
+			end = len(ips)
+		}
+		up, connIdx, lastErr := s.raceDial(ctx, host, port, scheme, action, matched, ips, start, end)
+		if up != nil {
+			s.DNS.Note(host, ips[connIdx].String(), false)
+			return up, nil
+		}
+		for i := start; i < end; i++ {
+			s.DNS.Note(host, ips[i].String(), true)
+		}
+		if lastErr == nil {
+			lastErr = errors.New("no usable address")
+		}
+	}
+	return nil, errors.New("no usable address")
+}
+
+// raceDial runs dial+TLS for ips[start:end] simultaneously and returns the
+// first connection that becomes fully usable (TCP plus, for https, a verified
+// handshake). Losers are cancelled; ones that already failed are reported via
+// DNS.Note so the address preference demotes them relative to the winner.
+func (s *Server) raceDial(ctx context.Context, host, port, scheme string, action rules.Action, matched bool, ips []net.IP, start, end int) (net.Conn, int, error) {
+	// ctx time-bounds the whole batch: dial and handshake budgets.
+	bctx, cancel := context.WithTimeout(ctx, s.DialTimeout*time.Duration(end-start))
+	defer cancel()
 	dialer := &net.Dialer{Timeout: s.DialTimeout}
+
+	type attempt struct {
+		idx  int
+		conn net.Conn
+		err  error
+	}
+	results := make(chan attempt, end-start)
+
+	for i := start; i < end; i++ {
+		go func(idx int, ip net.IP) {
+			sn, err := s.dialOne(bctx, dialer, host, port, scheme, action, matched, ip)
+			results <- attempt{idx: idx, conn: sn, err: err}
+		}(i, ips[i])
+	}
+
+	var conn net.Conn
+	connIdx := -1
 	var lastErr error
-	for i, ip := range ips {
-		addr := net.JoinHostPort(ip.String(), port)
-		raw, err := dialer.DialContext(ctx, "tcp", addr)
-		if err != nil {
-			lastErr = err
-			s.DNS.Note(host, ip.String(), true)
-			continue
+	seen := make(map[int]bool)
+	for len(seen) < end-start {
+		r := <-results
+		seen[r.idx] = true
+		if r.err != nil {
+			if r.idx < connIdx || connIdx < 0 {
+				lastErr = r.err
+			}
+			if r.idx != connIdx {
+				continue // winner already found; nothing more to do
+			}
+			break // winner's own attempt failed; keep draining
 		}
-		s.DNS.Note(host, ip.String(), false)
-		// Earlier candidates failed before this one worked; record that too.
-		for _, prev := range ips[:i] {
-			s.DNS.Note(host, prev.String(), true)
+		if connIdx < 0 {
+			// First usable connection wins the batch.
+			cancel()
+			conn = r.conn
+			connIdx = r.idx
+		} else {
+			r.conn.Close() // a duplicate usable connection; discard
 		}
-		if scheme != "https" {
-			return raw, nil
+	}
+	// Demote batch candidates that reported failure up to (but not incl.)
+	// the winner index, mirroring the serial order semantics.
+	if connIdx >= 0 {
+		for i := start; i < connIdx; i++ {
+			s.DNS.Note(host, ips[i].String(), true)
 		}
+	} else {
+		connIdx = start // so the caller's fallback Note loop covers the batch
+	}
+	return conn, connIdx, lastErr
+}
 
-		sni := ""
-		if matched {
-			sni = strings.TrimSpace(action.Rule.SNI)
-		}
-		cfg := &tls.Config{
-			ServerName: host,
-			RootCAs:    s.UpstreamRootCAs,
-			MinVersion: tls.VersionTLS12,
-			NextProtos: []string{"http/1.1"},
-		}
-		if sni != "" {
-			// The origin is asked for a different name than the one the client
-			// wants; the chain is checked against the real host below.
-			cfg.ServerName = sni
-			cfg.InsecureSkipVerify = true
-		}
+// dialOne opens one candidate: TCP dial then, for https, the SNI override and
+// upstream chain verification exactly as the desktop kernel does.
+func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, scheme string, action rules.Action, matched bool, ip net.IP) (net.Conn, error) {
+	addr := net.JoinHostPort(ip.String(), port)
+	raw, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if scheme != "https" {
+		return raw, nil
+	}
 
-		tc := tls.Client(raw, cfg)
-		if err := tc.HandshakeContext(ctx); err != nil {
-			raw.Close()
-			lastErr = err
-			s.DNS.Note(host, ip.String(), true)
-			continue
-		}
-		if sni == "" {
-			return tc, nil
-		}
-		if err := verifyFor(tc.ConnectionState(), host, s.UpstreamRootCAs); err != nil {
-			tc.Close()
-			lastErr = err
-			s.DNS.Note(host, ip.String(), true)
-			continue
-		}
+	sni := ""
+	if matched {
+		sni = strings.TrimSpace(action.Rule.SNI)
+	}
+	cfg := &tls.Config{
+		ServerName: host,
+		RootCAs:    s.UpstreamRootCAs,
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"http/1.1"},
+	}
+	if sni != "" {
+		// The origin is asked for a different name than the one the client
+		// wants; the chain is checked against the real host below.
+		cfg.ServerName = sni
+		cfg.InsecureSkipVerify = true
+	}
+
+	tc := tls.Client(raw, cfg)
+	if err := tc.HandshakeContext(ctx); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	if sni == "" {
 		return tc, nil
 	}
-	if lastErr == nil {
-		lastErr = errors.New("no usable address")
+	if err := verifyFor(tc.ConnectionState(), host, s.UpstreamRootCAs); err != nil {
+		tc.Close()
+		return nil, err
 	}
-	return nil, lastErr
+	return tc, nil
 }
 
 // resolve runs the DNS selection for an upstream dial.
