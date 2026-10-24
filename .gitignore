@@ -1,0 +1,11 @@
+# 本地冒烟目录（二进制、CA、配置副本、探测脚本）
+.smoke/
+
+# 构建产物
+/ds-core
+/ds-core.exe
+*.exe
+*.test
+
+# 运行时生成的 CA
+ca/
