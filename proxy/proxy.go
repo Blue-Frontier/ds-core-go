@@ -61,7 +61,7 @@ func New(cfg *config.Config, ca *certcache.Authority, log *slog.Logger) (*Server
 	return &Server{
 		Table:       table,
 		CA:          ca,
-		DNS:         dnsres.New(&cfg.Server, dnsres.DefaultServers),
+		DNS:         dnsres.New(&cfg.Server, dnsres.WithLogger(log)),
 		Log:         log,
 		DialTimeout: 10 * time.Second,
 	}, nil
@@ -94,6 +94,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.Log.Debug("connect", "host", host, "port", port)
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		conn.Close()
 		return
@@ -177,6 +178,7 @@ func (s *Server) serveOne(conn net.Conn, req *http.Request, host, port, scheme s
 	if req.URL != nil && req.URL.Path != "" {
 		path = req.URL.Path
 	}
+	s.Log.Debug("request", "method", req.Method, "host", host, "path", path)
 	action, matched := s.Table.Match(host, path)
 
 	// Redirect rules answer locally without touching the origin.
@@ -228,23 +230,32 @@ func (s *Server) serveOne(conn net.Conn, req *http.Request, host, port, scheme s
 }
 
 // dialUpstream resolves and connects to the origin, applying SNI overrides.
+//
+// Resolution mirrors the desktop kernel's selection order: preset IP list
+// wins, then the per-host provider mapping (DoH/DoT/TCP/UDP), and hosts that
+// only carry an SNI rule go through the ForSNI provider so their address
+// comes from the protected DNS pipe instead of the plain system DNS (which is
+// what makes `sni` usable in the first place).
 func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, action rules.Action, matched bool) (net.Conn, error) {
-	ips, err := s.DNS.Lookup(ctx, host)
+	ips, err := s.resolve(ctx, host, action, matched)
 	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", host, err)
-	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("resolve %s: no addresses", host)
+		return nil, err
 	}
 
 	dialer := &net.Dialer{Timeout: s.DialTimeout}
 	var lastErr error
-	for _, ip := range ips {
+	for i, ip := range ips {
 		addr := net.JoinHostPort(ip.String(), port)
 		raw, err := dialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
 			lastErr = err
+			s.DNS.Note(host, ip.String(), true)
 			continue
+		}
+		s.DNS.Note(host, ip.String(), false)
+		// Earlier candidates failed before this one worked; record that too.
+		for _, prev := range ips[:i] {
+			s.DNS.Note(host, prev.String(), true)
 		}
 		if scheme != "https" {
 			return raw, nil
@@ -271,14 +282,17 @@ func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, ac
 		if err := tc.HandshakeContext(ctx); err != nil {
 			raw.Close()
 			lastErr = err
+			s.DNS.Note(host, ip.String(), true)
 			continue
 		}
-		if sni != "" {
-			if err := verifyFor(tc.ConnectionState(), host, s.UpstreamRootCAs); err != nil {
-				tc.Close()
-				lastErr = err
-				continue
-			}
+		if sni == "" {
+			return tc, nil
+		}
+		if err := verifyFor(tc.ConnectionState(), host, s.UpstreamRootCAs); err != nil {
+			tc.Close()
+			lastErr = err
+			s.DNS.Note(host, ip.String(), true)
+			continue
 		}
 		return tc, nil
 	}
@@ -286,6 +300,29 @@ func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, ac
 		lastErr = errors.New("no usable address")
 	}
 	return nil, lastErr
+}
+
+// resolve runs the DNS selection for an upstream dial.
+func (s *Server) resolve(ctx context.Context, host string, action rules.Action, matched bool) ([]net.IP, error) {
+	sniRule := matched && strings.TrimSpace(action.Rule.SNI) != ""
+	if sniRule && !s.DNS.HasDNS(host) {
+		ips, err := s.DNS.LookupForSNI(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", host, err)
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("resolve %s: no addresses", host)
+		}
+		return ips, nil
+	}
+	ips, err := s.DNS.Lookup(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve %s: no addresses", host)
+	}
+	return ips, nil
 }
 
 func (s *Server) writeError(conn net.Conn, code int, err error) error {

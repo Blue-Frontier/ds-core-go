@@ -22,11 +22,12 @@ Rust 也能做（`rcgen`、`rustls`），但要额外引入 cargo-ndk 与 JNI �
 ## 目录
 
 ```
-config/      JSON5 子集解析 + 配置结构
+config/      JSON5 子集解析 + 配置结构（providers / mapping / preSetIpList）
 hostmatch/   主机模式匹配（精确 / 通配）
 rules/       规则编译与匹配（路径正则、exclusions、确定性排序）
 certcache/   CA 加载/生成，按需签发叶子证书并缓存
-dnsres/      预设 IP、按域名的 DNS 服务器、系统解析回退
+dnsres/      DNS子系统：预设IP、按域名的DNS提供方（DoH/DoT/TCP/UDP）、
+             DNS连接自身的SNI改写、ForSNI、IP优选与失败降位
 proxy/       CONNECT 终结、明文 HTTP、上游拨号、规则动作
 cmd/ds-core/ 独立运行的 CLI
 ```
@@ -38,17 +39,31 @@ cmd/ds-core/ 独立运行的 CLI
 - CONNECT 隧道 + TLS 终结，证书按 ClientHello 的 SNI 现场签发（IP 目标回退到 CONNECT 主机，带 IP SAN）
 - 路径级规则：`redirect`（返回 302 到镜像）、`proxy`（换上游主机）、`sni`（改写上游 SNI，之后按真实主机名校验证书链）
 - 明文 HTTP 代理（绝对形式请求）
-- DNS：`preSetIpList` 优先、`dns.mapping` 选择解析器、系统解析兜底
+- DNS（对齐 JS 内核 `mitmproxy/src/lib/dns`）：
+  - `preSetIpList` 最优先（数组与 `{ip: true}` 对象两种写法，`null` 删除条目占位）
+  - `server.dns.providers`：`https://`/`http://`（DoH, RFC 8484 wire+JSON 兜底）、
+    `tls://`/`dot://`（DoT, RFC 7858）、`tcp://`、纯 IP（UDP）四类传输
+  - **DNS 连接自身的 SNI 改写**：provider 配 `sni`（或 `servername`）时，到加密 DNS 的
+    TLS ClientHello 带伪 SNI、跳过证书校验（与桌面内核 `rejectUnauthorized:false` 一致）；
+    `forSNI`/`forSni` 标记的提供方是「有 sni 规则但无 DNS 映射」主机的默认解析器
+    （无标记时回退到 PreSet，与 `dnsMap.ForSNI ||= PreSet` 一致）
+  - `dns.mapping` 支持字符串与 `{dns, family}` 对象两种写法；旧配置直接写解析器名
+    （`quad9` 等）时按桌面默认地址回填 UDP 提供方
+  - 每提供方独立缓存 + IP 优选：拨号失败的上游 IP 降位到候选列表尾部（JS 内核
+    DynamicChoice 的重排版，配合本内核的「每个请求逐个拨号」模型）
+  - 主提供方解析为空时依次尝试其余提供方，再回退系统 DNS（`getFallbackDnsList` 语义）
 - CLI：`-config`、`-listen`、`-ca-dir`、`-v`
 
 尚未实现（按优先级）：
 
 - 响应体注入（`script` / `tampermonkeyScript`）——需要 HTML 改写
+- ECH / NAT64（`server.dns.ech`、`server.dns.nat64` 已解析占位）
+- SVCB/HTTPS(65) 查询（ECH 参数来源）
 - HTTP/2（当前 `NextProtos` 只提供 `http/1.1`）
 - WebSocket 与长连接升级
 - 流量/速度统计（桌面端 GUI 依赖）
-- 配置热更新、per-host 排除（`excludeIpList` 已解析未使用）
-- gomobile 封装与 Android 集成
+- 配置热更新、per-host 排除（`excludeIpList` 已解析未使用）、DNS 缓存 TTL（当前
+  与桌面内核一致采用 LRU+失败降位策略）
 
 ## 构建与运行
 
@@ -71,4 +86,11 @@ go run ./cmd/ds-core -config remote_config.json5 -listen 127.0.0.1:31181 -ca-dir
     Location: https://ghp.ci/https://github.com/docmirror/...  # 真实路径规则命中
 ```
 
-`go test ./...` 覆盖：JSON5 解析、规则匹配（含通配与 `exclusions`）、证书签发与校验（域名/IP）、端到端 MITM 透传、302 重定向、明文 HTTP、以及"客户端不信任内核 CA 时必须失败"的负向用例。
+`go test ./...` 覆盖：JSON5 解析（含 providers / 对象形态 mapping 与 preSetIpList）、规则匹配
+（含通配与 `exclusions`）、证书签发与校验（域名/IP）、
+DNS 报文编解码（A/AAAA、压缩指针）、DoH（wire + JSON）、DoT（含 SNI 改写与正常校验）、
+UDP/TCP 传输、预设 IP / 映射 / ForSNI 选择、IP 失败降位优选、
+端到端 MITM 透传、302 重定向、明文 HTTP、ForSNI 代理链路、
+以及"客户端不信任内核 CA 时必须失败"的负向用例。
+对外网依赖的冒烟（本机实测）：阿里 DoH / DoT / UDP 三传输经代理建连均 200，
+`sni` 改写访问 DoT/DoH 端点生效。
