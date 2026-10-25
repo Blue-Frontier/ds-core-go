@@ -200,7 +200,7 @@ func (s *Server) serveOne(conn net.Conn, req *http.Request, host, port, scheme s
 		dstHost = hostmatch.Normalize(action.Rule.Proxy)
 	}
 
-	upstream, err := s.dialUpstream(req.Context(), dstHost, port, scheme, action, matched)
+	upstream, upstreamIP, err := s.dialUpstream(req.Context(), dstHost, port, scheme, action, matched)
 	if err != nil {
 		s.Log.Warn("upstream failed", "host", host, "err", err)
 		return s.writeError(conn, http.StatusBadGateway, err)
@@ -214,19 +214,49 @@ func (s *Server) serveOne(conn net.Conn, req *http.Request, host, port, scheme s
 	out.Close = true
 	stripHopHeaders(out.Header)
 
-	if err := out.Write(upstream); err != nil {
-		return s.writeError(conn, http.StatusBadGateway, err)
+	// A successful TLS handshake does not mean the origin answers: some
+	// addresses are quietly blackholed after the handshake (every packet on
+	// the established flow is dropped). Bound the response-header window; on
+	// a timeout demote the address and redial once - the next race dial then
+	// leads with the other candidates. The body itself is unbounded after the
+	// headers arrive.
+	const respHeaderTimeout = 10 * time.Second
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		tw := time.Now()
+		err := out.Write(upstream)
+		if err == nil {
+			s.Log.Debug("upstream request written", "host", host, "ms", time.Since(tw).Milliseconds())
+			upstream.SetReadDeadline(time.Now().Add(respHeaderTimeout))
+			tr := time.Now()
+			resp, err = http.ReadResponse(bufio.NewReader(upstream), out)
+			if err == nil {
+				s.Log.Debug("response received", "host", host, "status", resp.StatusCode, "ms", time.Since(tr).Milliseconds())
+				upstream.SetReadDeadline(time.Time{})
+				defer resp.Body.Close()
+				break
+			}
+		}
+		// Dead address: demote it so the follow-up dial skips it.
+		s.DNS.Note(dstHost, upstreamIP, true)
+		upstream.Close()
+		if attempt >= 1 {
+			s.Log.Warn("upstream failed", "host", host, "err", err)
+			return s.writeError(conn, http.StatusBadGateway, err)
+		}
+		s.Log.Debug("upstream retry", "host", host, "ip", upstreamIP, "err", err)
+		upstream, upstreamIP, err = s.dialUpstream(req.Context(), dstHost, port, scheme, action, matched)
+		if err != nil {
+			s.Log.Warn("upstream failed", "host", host, "err", err)
+			return s.writeError(conn, http.StatusBadGateway, err)
+		}
+		defer upstream.Close()
 	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(upstream), out)
-	if err != nil {
-		return s.writeError(conn, http.StatusBadGateway, err)
-	}
-	defer resp.Body.Close()
 
 	if err := resp.Write(conn); err != nil {
 		return err
 	}
+	s.Log.Debug("response written", "host", host, "status", resp.StatusCode)
 	if req.Close {
 		return errClose
 	}
@@ -240,10 +270,10 @@ func (s *Server) serveOne(conn net.Conn, req *http.Request, host, port, scheme s
 // only carry an SNI rule go through the ForSNI provider so their address
 // comes from the protected DNS pipe instead of the plain system DNS (which is
 // what makes `sni` usable in the first place).
-func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, action rules.Action, matched bool) (net.Conn, error) {
+func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, action rules.Action, matched bool) (net.Conn, string, error) {
 	ips, err := s.resolve(ctx, host, action, matched)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// Race dial: GFW-dropped addresses sit ahead of reachable ones in fresh
@@ -260,7 +290,7 @@ func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, ac
 		up, connIdx, lastErr := s.raceDial(ctx, host, port, scheme, action, matched, ips, start, end)
 		if up != nil {
 			s.DNS.Note(host, ips[connIdx].String(), false)
-			return up, nil
+			return up, ips[connIdx].String(), nil
 		}
 		for i := start; i < end; i++ {
 			s.DNS.Note(host, ips[i].String(), true)
@@ -269,7 +299,7 @@ func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, ac
 			lastErr = errors.New("no usable address")
 		}
 	}
-	return nil, errors.New("no usable address")
+	return nil, "", errors.New("no usable address")
 }
 
 // raceDial runs dial+TLS for ips[start:end] simultaneously and returns the
@@ -281,6 +311,7 @@ func (s *Server) raceDial(ctx context.Context, host, port, scheme string, action
 	bctx, cancel := context.WithTimeout(ctx, s.DialTimeout*time.Duration(end-start))
 	defer cancel()
 	dialer := &net.Dialer{Timeout: s.DialTimeout}
+	batchAt := time.Now()
 
 	type attempt struct {
 		idx  int
@@ -291,7 +322,11 @@ func (s *Server) raceDial(ctx context.Context, host, port, scheme string, action
 
 	for i := start; i < end; i++ {
 		go func(idx int, ip net.IP) {
+			ta := time.Now()
 			sn, err := s.dialOne(bctx, dialer, host, port, scheme, action, matched, ip)
+			if err != nil {
+				s.Log.Debug("dial attempt failed", "host", host, "ip", ip.String(), "ms", time.Since(ta).Milliseconds(), "err", err)
+			}
 			results <- attempt{idx: idx, conn: sn, err: err}
 		}(i, ips[i])
 	}
@@ -327,6 +362,7 @@ func (s *Server) raceDial(ctx context.Context, host, port, scheme string, action
 		for i := start; i < connIdx; i++ {
 			s.DNS.Note(host, ips[i].String(), true)
 		}
+		s.Log.Debug("dial winner", "host", host, "ip", ips[connIdx].String(), "ms", time.Since(batchAt).Milliseconds())
 	} else {
 		connIdx = start // so the caller's fallback Note loop covers the batch
 	}
