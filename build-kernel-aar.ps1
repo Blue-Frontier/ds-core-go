@@ -12,6 +12,9 @@ $env:ANDROID_HOME = 'C:\Users\Nobody\android-toolchain\android-sdk'
 $env:GOPROXY = 'https://goproxy.cn,direct'
 $env:HTTPS_PROXY = 'http://127.0.0.1:31181'
 Set-Location $PSScriptRoot
+# A fresh clone has no build\ (it is git-ignored) and gomobile will not create
+# the output file's parent directory; it fails with a bare "cannot find the path".
+New-Item -ItemType Directory -Path build -Force | Out-Null
 gomobile bind -target=android/arm64 -androidapi=35 -o build\kernel.aar ./mobile
 if ($LASTEXITCODE) {
     Write-Host "GOMOBILE-FAILED exit=$LASTEXITCODE"
