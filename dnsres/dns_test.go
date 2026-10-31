@@ -241,3 +241,19 @@ func TestProviderDotVerified(t *testing.T) {
 		t.Fatalf("ips = %v", ips)
 	}
 }
+
+// The desktop re-ranks by success rate after every request (doRank); a single
+// failure must not outweigh a long healthy history.
+func TestIPPreferenceRanksBySuccessRate(t *testing.T) {
+	c := newIPChoice([]string{"10.0.0.1", "10.0.0.2"})
+	for i := 0; i < 5; i++ {
+		c.count("10.0.0.2", true)
+	}
+	c.count("10.0.0.1", true)  // one failure sinks it, as changeNext would
+	c.count("10.0.0.1", false) // a success re-ranks: 0.857 against 0.5
+
+	got := c.orderedList()
+	if got[0] != "10.0.0.1" {
+		t.Fatalf("the healthy address should lead after ranking, got %v", got)
+	}
+}

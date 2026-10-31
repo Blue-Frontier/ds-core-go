@@ -2,6 +2,7 @@ package dnsres
 
 import (
 	"container/list"
+	"sort"
 	"sync"
 )
 
@@ -43,7 +44,9 @@ func (c *ipChoice) orderedList() []string {
 
 // doCount records one use (isError=false) or failure (isError=true) of ip.
 // A failing candidate is demoted so the next lookup leads with a different
-// address.
+// address, mirroring the desktop's changeNext (it switches on the first
+// consecutive failure); a success re-ranks by success rate, mirroring doRank,
+// which the desktop calls after every proxied request.
 func (c *ipChoice) doCount(ip string, isError bool) {
 	cnt, ok := c.stats[ip]
 	if !ok {
@@ -59,15 +62,45 @@ func (c *ipChoice) doCount(ip string, isError bool) {
 	cnt.total++
 	cnt.successRate = 1.0 - float64(cnt.errorCount)/float64(cnt.total)
 
-	if isError && len(c.order) > 1 {
-		for i, v := range c.order {
-			if v == ip {
-				c.order = append(c.order[:i], c.order[i+1:]...)
-				c.order = append(c.order, ip)
-				break
-			}
+	if isError {
+		c.sink(ip)
+	} else {
+		c.doRank()
+	}
+}
+
+// sink moves a failing candidate to the tail: an address that just refused a
+// connection should not lead the next attempt.
+func (c *ipChoice) sink(ip string) {
+	if len(c.order) < 2 {
+		return
+	}
+	for i, v := range c.order {
+		if v == ip {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			c.order = append(c.order, ip)
+			return
 		}
 	}
+}
+
+// doRank sorts the candidates by success rate, stable so equal rates keep the
+// rotation order. Unseen addresses start at 0.5, like the desktop's
+// setBackupList default.
+func (c *ipChoice) doRank() {
+	if len(c.order) < 2 {
+		return
+	}
+	sort.SliceStable(c.order, func(i, j int) bool {
+		return c.rate(c.order[i]) > c.rate(c.order[j])
+	})
+}
+
+func (c *ipChoice) rate(ip string) float64 {
+	if cnt, ok := c.stats[ip]; ok {
+		return cnt.successRate
+	}
+	return 0.5
 }
 
 // count applies outside feedback; identical to doCount here.
@@ -126,3 +159,4 @@ func (c *lru) set(key string, v *ipChoice) {
 		delete(c.m, last.Value.(*lruEntry).key)
 	}
 }
+
