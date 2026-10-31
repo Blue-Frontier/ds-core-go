@@ -1,10 +1,14 @@
-# Rebuilds build\kernel.aar for arm64 from ./mobile.
+# Rebuilds build\kernel.aar from ./mobile.
 #
 # Local runs pick up the toolchain env.ps1 and the desktop proxy; CI sets
 # ANDROID_HOME / ANDROID_NDK_HOME itself, has gomobile on PATH and needs no
 # proxy. Everything below therefore only fills the gaps.
+param(
+    # gomobile targets. android/arm64 covers phones; android/amd64 is x86_64
+    # (emulators, Chromebooks). Several targets may be comma separated.
+    [string]$Target = 'android/arm64'
+)
 $ErrorActionPreference = 'Stop'
-
 $localEnv = 'C:\Users\Nobody\android-toolchain\env.ps1'
 if (Test-Path $localEnv) {
     . $localEnv
@@ -42,4 +46,5 @@ if ($LASTEXITCODE) {
     exit 1
 }
 Write-Host 'GOMOBILE-OK'
+
 
