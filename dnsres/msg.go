@@ -130,6 +130,27 @@ func parseResponse(b []byte) (*response, error) {
 	return r, nil
 }
 
+// answerRaw returns the RDATA of the first record of qtype.
+func (r *response) answerRaw(qtype uint16) []byte {
+	for _, a := range r.answers {
+		if a.typ == qtype {
+			return a.data
+		}
+	}
+	return nil
+}
+
+// answerAll returns every RDATA of qtype, in wire order.
+func (r *response) answerAll(qtype uint16) [][]byte {
+	var out [][]byte
+	for _, a := range r.answers {
+		if a.typ == qtype {
+			out = append(out, a.data)
+		}
+	}
+	return out
+}
+
 // answerIPs returns the addresses of `qtype` records, in wire order.
 func (r *response) answerIPs(qtype uint16) []string {
 	var ips []string

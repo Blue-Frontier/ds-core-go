@@ -53,17 +53,34 @@ cmd/ds-core/ 独立运行的 CLI
     DynamicChoice 的重排版，配合本内核的「每个请求逐个拨号」模型）
   - 主提供方解析为空时依次尝试其余提供方，再回退系统 DNS（`getFallbackDnsList` 语义）
 - CLI：`-config`、`-listen`、`-ca-dir`、`-v`
+- 响应体注入（对齐 JS 的 `InsertScriptMiddleware` + `script.js`）：
+  - `script` 支持字符串与数组；`tampermonkeyScript` 先于其它脚本插入
+  - 绝对 URL 在启动时登记进脚本站，注入标签指向内核自己的 `/____ds_script____/<key>`，
+    脚本按需下载并缓存，因此始终与页面同源
+  - `</head>`（其次 `</body>`）前切拼；`Content-Security-Policy` 的 `script-src`
+    补 `'self'`，已有 `nonce-` 时透传给注入标签
+  - 只对 `text/html` 生效；有脚本规则的请求把上游 `Accept-Encoding` 收窄为
+    `gzip, deflate`，解压后重新 gzip，避免标准库不支持的 `br`/`zstd`
+  - github.com 特判：`turbo-frame: repo-content-turbo-frame` 的响应不注入，
+    并追加 `github.githubassets.com/assets/fakefile.js` 纠正其异步 loader 的根路径
+- `whiteList` / `proxy.excludeIpList`：命中的主机在 CONNECT 阶段直接做字节隧道，
+  不终结 TLS（客户端看到的是源站证书）
+- WebSocket / 长连接升级：`Connection: Upgrade` 请求透传到上游，101 响应原样回写后双向管道
+- 流量统计：请求、响应、注入、隧道、卡顿、字节数以及 per-host 计数，
+  通过移动端 `KernelStats(handle)` 以 JSON 导出
+- 本地端点（不走上游）：`/____ds_script____/<key>` 返回注入脚本，
+  `/__ds_stats__` 返回计数器 JSON
+- `verifyHost`：`sni` 故意换成另一个真实域名时，按该名字校验证书链
+- `server.compatible.request["host:port"].rejectUnauthorized = false`：按目标跳过上游校验
 
 尚未实现（按优先级）：
 
-- 响应体注入（`script` / `tampermonkeyScript`）——需要 HTML 改写
-- ECH / NAT64（`server.dns.ech`、`server.dns.nat64` 已解析占位）
-- SVCB/HTTPS(65) 查询（ECH 参数来源）
-- HTTP/2（当前 `NextProtos` 只提供 `http/1.1`）
-- WebSocket 与长连接升级
-- 流量/速度统计（桌面端 GUI 依赖）
-- 配置热更新、per-host 排除（`excludeIpList` 已解析未使用）、DNS 缓存 TTL（当前
-  与桌面内核一致采用 LRU+失败降位策略）
+- HTTP/2（`NextProtos` 只提供 `http/1.1`；要支持需要在 MITM 之后按流处理请求，
+  等于第二套代理实现，且无法离线验证）
+- ECH / NAT64 / SVCB/HTTPS(65)（`server.dns.ech`、`nat64` 已解析占位）
+- 配置热更新
+- `speedTest`（已解析但未执行；等价能力由拨号失败降位提供）
+- `sni: ""` 显式禁用 SNI（当前空串等同于未配置）
 
 ## 构建与运行
 
@@ -71,7 +88,7 @@ cmd/ds-core/ 独立运行的 CLI
 go build ./...
 go test ./...
 
-go run ./cmd/ds-core -config remote_config.json5 -listen 127.0.0.1:31181 -ca-dir ./ca
+go run ./cmd/ds-core -config remote_config.json5 -listen 127.0.0.1:31191 -ca-dir ./ca
 ```
 
 把 `ca/ca.crt` 装进系统/浏览器信任库后，HTTPS 才能通过；不装的话隧道仍可用，但客户端会拒绝我们签发的证书（这是有意的行为，测试里也有对应用例）。

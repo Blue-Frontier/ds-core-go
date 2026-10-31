@@ -212,7 +212,9 @@ func TestSNIRuleUsesForSNIProvider(t *testing.T) {
 	}
 	proxyAddr, ca := startProxyFull(t, intercepts, roots, serverCfg)
 	client := clientFor(proxyAddr, ca)
-	client.Timeout = 5 * time.Second
+	// The fake DNS speaks UDP, so a dropped packet costs the resolver's full
+	// query timeout. This test asserts routing, not latency, so leave room.
+	client.Timeout = 20 * time.Second
 
 	resp, err := client.Get("https://sni.example" + ":" + upPort + "/p")
 	if err != nil {

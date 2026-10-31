@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 const sample = `
 {
@@ -126,5 +129,166 @@ func TestParseDNSProviders(t *testing.T) {
 	}
 	if m := cfg.Server.DNS.Mapping["*.example.org"]; m.DNSName != "quad9-ip" || m.Family != 6 {
 		t.Errorf("mapping object = %+v", m)
+	}
+}
+
+// The official configuration is JSON5: unquoted keys plus regexes written in
+// JS style ("x\.com"), which strict JSON rejects. Both must load.
+func TestParseJSON5BareKeysAndLenientEscapes(t *testing.T) {
+	src := []byte(`
+{
+  app: {
+    metaInfo: {
+      id: "official",
+      version: 202610161530,
+      updateLog: "it's fine",
+    },
+  },
+  server: {
+    intercepts: {
+      "x.example": {
+        "^(.+\.)?x\.com$": { sni: "a" },
+      },
+    },
+  },
+}
+`)
+	c, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.App.MetaInfo.ID != "official" {
+		t.Fatalf("meta id = %q", c.App.MetaInfo.ID)
+	}
+	if c.App.MetaInfo.Version != 202610161530 {
+		t.Fatalf("meta version = %d", c.App.MetaInfo.Version)
+	}
+	if c.App.MetaInfo.UpdateLog != "it's fine" {
+		t.Fatalf("updateLog = %q", c.App.MetaInfo.UpdateLog)
+	}
+	rules := c.Server.Intercepts["x.example"]
+	if len(rules) != 1 {
+		t.Fatalf("rules = %+v", rules)
+	}
+	// JS drops the backslash of an unknown escape, so "x\.com" -> "x.com".
+	for pattern, rule := range rules {
+		if pattern != "^(.+.)?x.com$" {
+			t.Fatalf("pattern = %q", pattern)
+		}
+		if rule.SNI != "a" {
+			t.Fatalf("rule = %+v", rule)
+		}
+	}
+}
+
+// abort/success accept the literal true or an object; options is a switch whose
+// tunables sit beside it.
+func TestParseSyntheticActions(t *testing.T) {
+	src := []byte(`
+{
+  server: {
+    intercepts: {
+      "a.example": {
+        "^/x$": { abort: true },
+        "^/y$": { success: { script: ";", status: 204 } },
+        "^/z$": { success: true, status: 204 },
+        "^/o$": { options: true, optionsMaxAge: 60, optionsCredentials: false },
+      },
+    },
+  },
+}
+`)
+	c, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rules := c.Server.Intercepts["a.example"]
+
+	abort := rules["^/x$"]
+	if abort.Abort == nil || !abort.Abort.Enabled {
+		t.Fatalf("abort = %+v", abort.Abort)
+	}
+	if abort.Success != nil {
+		t.Fatal("abort rule must not carry success")
+	}
+
+	succ := rules["^/y$"]
+	if succ.Success == nil || succ.Success.Status != 204 || succ.Success.Script != ";" {
+		t.Fatalf("success = %+v", succ.Success)
+	}
+
+	// "success: true" with a sibling status: the desktop ignores the sibling,
+	// so Status stays zero and the kernel falls back to 200.
+	flag := rules["^/z$"]
+	if flag.Success == nil || !flag.Success.Enabled || flag.Success.Status != 0 {
+		t.Fatalf("success flag = %+v", flag.Success)
+	}
+
+	opt := rules["^/o$"]
+	if !bool(opt.Options) {
+		t.Fatal("options switch not enabled")
+	}
+	if opt.OptionsMaxAge != 60 {
+		t.Fatalf("optionsMaxAge = %d", opt.OptionsMaxAge)
+	}
+	if opt.OptionsCredentials == nil || *opt.OptionsCredentials {
+		t.Fatalf("optionsCredentials = %v", opt.OptionsCredentials)
+	}
+}
+
+// responseReplace carries arbitrary header values and the download switch.
+func TestParseResponseReplace(t *testing.T) {
+	src := []byte(`
+{
+  server: {
+    intercepts: {
+      "a.example": {
+        "^/d$": { responseReplace: { doDownload: true, headers: { "content-type": "text/plain", "x-n": 3 } } },
+        "^/h$": { responseReplace: { headers: { "x-keep": "[remove]" } }, cacheDays: 7 },
+      },
+    },
+  },
+}
+`)
+	c, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rules := c.Server.Intercepts["a.example"]
+
+	d := rules["^/d$"]
+	if d.ResponseReplace == nil || !d.ResponseReplace.DoDownload {
+		t.Fatalf("doDownload not parsed: %+v", d.ResponseReplace)
+	}
+	if got := d.ResponseReplace.Headers["content-type"]; got != "text/plain" {
+		t.Fatalf("content-type = %v", got)
+	}
+
+	h := rules["^/h$"]
+	if h.CacheDays != 7 {
+		t.Fatalf("cacheDays = %d", h.CacheDays)
+	}
+	if got := h.ResponseReplace.Headers["x-keep"]; got != "[remove]" {
+		t.Fatalf("x-keep = %v", got)
+	}
+}
+
+// A preset entry written as an object carries a description; it is enabled
+// unless it says otherwise. Treating it as disabled emptied the list.
+func TestIPListObjectEntries(t *testing.T) {
+	var list IPList
+	body := `{"192.0.2.10":{"desc":"自动地区官方"},"192.0.2.11":false,"192.0.2.12":true}`
+	if err := json.Unmarshal([]byte(body), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("got %v, want two enabled addresses", list)
+	}
+	seen := map[string]bool{}
+	for _, ip := range list {
+		seen[ip] = true
+	}
+	if !seen["192.0.2.10"] || !seen["192.0.2.12"] || seen["192.0.2.11"] {
+		t.Fatalf("unexpected entries: %v", list)
 	}
 }

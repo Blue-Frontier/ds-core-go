@@ -281,6 +281,95 @@ func (r *Resolver) resolve(ctx context.Context, host string, forSNI bool) ([]net
 	return nil, fmt.Errorf("resolve %s: no addresses", h)
 }
 
+// LookupFallback resolves host while skipping the preset list. The kernel calls
+// it when every preset address turned out to be dead: the preset list is a hint,
+// not a hard override, and reaching the origin through normal DNS is better
+// than failing every request for that host.
+func (r *Resolver) LookupFallback(ctx context.Context, host string) ([]net.IP, error) {
+	h := hostmatch.Normalize(host)
+	if h == "" {
+		return nil, errors.New("dnsres: empty host")
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return []net.IP{ip}, nil
+	}
+	primary := r.primary(h)
+	if primary == r.preset || primary == nil {
+		// Encrypted transports first: the whole point of the built-in providers
+		// is to obtain an answer plaintext DNS would poison, so a fallback that
+		// starts with UDP defeats it. They are queried concurrently so one slow
+		// or blocked provider cannot hold up the answer.
+		candidates := make([]*Provider, 0, len(r.order))
+		for _, p := range r.providersBySecurity() {
+			if p != r.preset {
+				candidates = append(candidates, p)
+			}
+		}
+		if ips := r.raceProviders(ctx, candidates, h); len(ips) > 0 {
+			return ips, nil
+		}
+		return r.systemLookup(ctx, h)
+	}
+	return r.remainingProvidersAndSystem(ctx, h, primary), nil
+}
+
+// raceProviders queries every provider at once and returns the first answer.
+// A slow or blackholed provider therefore costs nothing as long as any other
+// one replies; the losers are cancelled.
+func (r *Resolver) raceProviders(ctx context.Context, providers []*Provider, host string) []net.IP {
+	if len(providers) == 0 {
+		return nil
+	}
+	if len(providers) == 1 {
+		return r.viaProvider(ctx, providers[0], host, 0)
+	}
+
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	answers := make(chan []net.IP, len(providers))
+	for _, p := range providers {
+		go func(p *Provider) {
+			ips := r.viaProvider(rctx, p, host, 0)
+			select {
+			case answers <- ips:
+			case <-rctx.Done():
+			}
+		}(p)
+	}
+
+	for range providers {
+		select {
+		case ips := <-answers:
+			if len(ips) > 0 {
+				return ips
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	return nil
+}
+
+// providersBySecurity lists the providers with DoT/DoH ahead of the plaintext
+// ones, keeping the configured order inside each tier.
+func (r *Resolver) providersBySecurity() []*Provider {
+	encrypted := make([]*Provider, 0, len(r.order))
+	plain := make([]*Provider, 0, len(r.order))
+	for _, name := range r.order {
+		p := r.providers[name]
+		if p == nil {
+			continue
+		}
+		if p.typ == typDoH || p.typ == typDoT {
+			encrypted = append(encrypted, p)
+		} else {
+			plain = append(plain, p)
+		}
+	}
+	return append(encrypted, plain...)
+}
+
 // remainingProvidersAndSystem tries every provider except the one already
 // attempted (desktop getFallbackDnsList minus PreSet), then the system DNS.
 func (r *Resolver) remainingProvidersAndSystem(ctx context.Context, h string, tried *Provider) []net.IP {
@@ -299,6 +388,15 @@ func (r *Resolver) remainingProvidersAndSystem(ctx context.Context, h string, tr
 		return nil
 	}
 	return ips
+}
+
+// UsesPreset reports whether host is served by the preset address list, so the
+// caller knows a failure there means the hint is stale rather than the network.
+func (r *Resolver) UsesPreset(host string) bool {
+	if r == nil {
+		return false
+	}
+	return r.primary(hostmatch.Normalize(host)) == r.preset
 }
 
 // primary picks preset → mapped provider, or nil (system DNS).

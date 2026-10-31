@@ -336,6 +336,48 @@ func (p *Provider) queryTransport(ctx context.Context, host string, family int) 
 	return answerStrings(resp, qtype), nil
 }
 
+// queryRaw runs one query of an arbitrary type and returns the first RDATA of
+// that type. It bypasses the address cache: these answers are not addresses.
+func (p *Provider) queryRawList(ctx context.Context, host string, qtype uint16) ([][]byte, error) {
+	pkg := encodeQuery(host, qtype)
+
+	switch p.typ {
+	case typDoH:
+		resp, err := p.doh.queryWire(ctx, pkg)
+		if err != nil {
+			return nil, err
+		}
+		if resp.truncated || resp.rcode != 0 {
+			return nil, nil
+		}
+		return resp.answerAll(qtype), nil
+	}
+
+	var raw []byte
+	var err error
+	switch p.typ {
+	case typUDP:
+		raw, err = queryUDP(ctx, p.server, strconv.Itoa(p.port), p.family, pkg)
+	case typTCP:
+		raw, err = queryTCP(ctx, p.server, strconv.Itoa(p.port), p.family, pkg)
+	case typDoT:
+		raw, err = queryDoT(ctx, p.server, strconv.Itoa(p.port), p.sni, p.family, p.rootCAs, pkg)
+	default:
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	resp, err := parseResponse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if resp.rcode != 0 {
+		return nil, nil
+	}
+	return resp.answerAll(qtype), nil
+}
+
 // answerStrings extracts the addresses of qtype records, in wire order.
 func answerStrings(resp *response, qtype uint16) []string {
 	if resp == nil {
