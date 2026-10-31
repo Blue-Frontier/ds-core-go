@@ -18,6 +18,10 @@ if (-not $env:ANDROID_HOME) {
 }
 if (-not $env:ANDROID_HOME) { throw 'ANDROID_HOME is not set' }
 
+# gomobile shells out to javac when it generates the Java bindings. setup-java
+# puts it on PATH, but a bare JAVA_HOME does not, so add it explicitly.
+if ($env:JAVA_HOME) { $env:PATH = "$env:JAVA_HOME\bin;$env:PATH" }
+
 # NDK: an explicit ANDROID_NDK_HOME wins, otherwise the newest one under the SDK.
 if (-not $env:ANDROID_NDK_HOME) {
     $ndk = Get-ChildItem (Join-Path $env:ANDROID_HOME 'ndk') -Directory -ErrorAction SilentlyContinue |
@@ -38,3 +42,4 @@ if ($LASTEXITCODE) {
     exit 1
 }
 Write-Host 'GOMOBILE-OK'
+
