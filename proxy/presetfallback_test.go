@@ -30,6 +30,22 @@ func TestPresetDeadMemory(t *testing.T) {
 	}
 }
 
+// A mark that outlives the request which set it turns one bad round into
+// minutes of "use DNS instead". The desktop kernel keeps no such state, so the
+// window is a short cooldown and an unsuccessful DNS attempt clears it.
+func TestPresetDeadClearedWhenSkippingWasWrong(t *testing.T) {
+	s := newSettingServer(t, config.Server{})
+	s.markPresetDead("example.com")
+	s.clearPresetDead("example.com")
+	if s.presetConsideredDead("example.com") {
+		t.Fatal("clearing must make the preset eligible again")
+	}
+
+	if presetDeadTTL > time.Minute {
+		t.Fatalf("cooldown %v is too long to survive a flaky address batch", presetDeadTTL)
+	}
+}
+
 func TestSameIPSet(t *testing.T) {
 	a := []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("192.0.2.2")}
 	b := []net.IP{net.ParseIP("192.0.2.2"), net.ParseIP("192.0.2.1")}

@@ -820,7 +820,10 @@ func (s *Server) dialUpstream(ctx context.Context, host, port, scheme string, ac
 	}
 
 	// Last resort: the preset list we skipped, in case DNS is the broken side.
+	// Either way the mark has been proven a guess, so drop it and let the next
+	// request lead with the preset again.
 	if !fresh {
+		s.clearPresetDead(host)
 		if up, ip, ok := s.raceAll(ctx, host, port, scheme, action, matched, ips); ok {
 			return up, ip, nil
 		}
