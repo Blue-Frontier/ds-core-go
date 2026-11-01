@@ -69,8 +69,10 @@ func (p *presetIndex) matchList(host string) []net.IP {
 // Provider is one DNS service (DoH / DoT / TCP / UDP / PreSet) with its own
 // cache and IP preference state.
 type Provider struct {
-	Name string
-	typ  string
+	// choice persists this provider's per-host verdicts, when caching is on.
+	choice *choiceCache
+	Name   string
+	typ    string
 
 	preset  *presetIndex // checked first, as on the desktop kernel
 	cache   *lru         // hostname -> *ipChoice
@@ -249,6 +251,14 @@ func (p *Provider) lookup(ctx context.Context, host string, family int) ([]net.I
 	// Cache the choice list (real addresses only; fallback to system DNS is
 	// the resolver chain's job, not a fake candidate here).
 	c := newIPChoice(ips)
+	if p.choice != nil {
+		if seeded := p.choice.seed(host, ips); len(seeded) > 0 {
+			c.stats = seeded
+			c.doRank()
+		}
+		choice := p.choice
+		c.onChange = func(ip string, isError bool) { choice.record(host, ip, isError) }
+	}
 	p.mu.Lock()
 	p.cache.set(host, c)
 	p.mu.Unlock()
@@ -415,4 +425,15 @@ func stringsToIPs(list []string) []net.IP {
 		}
 	}
 	return out
+}
+
+// forgetChoices drops cached candidate lists, used when the network changed and
+// previous verdicts no longer apply.
+func (p *Provider) forgetChoices() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.cache = newLRU(0)
+	p.mu.Unlock()
 }

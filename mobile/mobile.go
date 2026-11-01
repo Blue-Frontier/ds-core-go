@@ -108,6 +108,10 @@ func StartKernel(configPath, listenAddr, caDir, logFile string) string {
 
 	// The personal and local layers live next to the official config.
 	dir := filepath.Dir(configPath)
+	// Verdicts on candidate addresses outlive the process: the app restarts the
+	// kernel on every launch, so without this every session starts from the DNS
+	// order and can spend its dial budget on dead addresses.
+	dnsres.SetDefaultChoiceCache(filepath.Join(dir, "dns-choice.json"))
 	personalPath := filepath.Join(dir, "remote_config_personal.json5")
 	userPath := filepath.Join(dir, "user_config.json5")
 	load := func() (*config.LoadResult, error) {
@@ -429,3 +433,4 @@ func ResetRuleText(configPath, host string) string {
 	}
 	return `{"ok":true}`
 }
+

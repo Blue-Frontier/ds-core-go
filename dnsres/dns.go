@@ -74,15 +74,45 @@ type Resolver struct {
 	// the desktop's getDNSAndFamily does before falling back to the mapping.
 	echDomains  []string
 	echProvider *Provider
-	system      *net.Resolver
-	log         *slog.Logger
-	rootCAs     *x509.CertPool
+	// choice persists per-host IP verdicts across process restarts.
+	choice  *choiceCache
+	system  *net.Resolver
+	log     *slog.Logger
+	rootCAs *x509.CertPool
 }
 
 type mappingEntry struct {
 	pattern string
 	name    string
 	family  int
+}
+
+// defaultChoiceCache is the file used by resolvers created through New. It is
+// set by the embedding process (the Android build points it at its files dir).
+var defaultChoiceCache string
+
+// SetDefaultChoiceCache makes resolvers created afterwards persist their IP
+// verdicts to path. An empty path disables persistence.
+func SetDefaultChoiceCache(path string) { defaultChoiceCache = path }
+
+// ResetChoice forgets every learned verdict, on disk as well. A network change
+// invalidates them: an address that worked on Wi-Fi can be poisoned on mobile.
+func (r *Resolver) ResetChoice() {
+	if r == nil || r.choice == nil {
+		return
+	}
+	r.choice.reset()
+	for _, p := range r.providers {
+		p.forgetChoices()
+	}
+}
+
+// FlushChoice writes pending verdicts; call it before the process goes away.
+func (r *Resolver) FlushChoice() {
+	if r == nil || r.choice == nil {
+		return
+	}
+	r.choice.flush()
 }
 
 // New builds a resolver from the "server" section.
@@ -138,6 +168,13 @@ func New(s *config.Server, opts ...Option) *Resolver {
 		} else if ech.DNS != "" {
 			r.log.Warn("dnsres: ech.dns provider not found", "name", ech.DNS)
 		}
+	}
+
+	if r.choice == nil {
+		r.choice = loadChoiceCache(defaultChoiceCache)
+	}
+	for _, p := range r.providers {
+		p.choice = r.choice
 	}
 
 	// Mapping entries: longest pattern first so specific entries win.

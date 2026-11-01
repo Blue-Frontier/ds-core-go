@@ -30,6 +30,8 @@ type ipCount struct {
 type ipChoice struct {
 	stats map[string]*ipCount
 	order []string // preference order; failures sink to the tail
+	// onChange reports each verdict to the persistent cache, when one is set.
+	onChange func(ip string, isError bool)
 }
 
 // newIPChoice builds candidate state for a fresh backup list.
@@ -66,6 +68,9 @@ func (c *ipChoice) doCount(ip string, isError bool) {
 		c.sink(ip)
 	} else {
 		c.doRank()
+	}
+	if c.onChange != nil {
+		c.onChange(ip, isError)
 	}
 }
 
