@@ -26,6 +26,7 @@ import (
 	"github.com/Blue-Frontier/ds-core-go/certcache"
 	"github.com/Blue-Frontier/ds-core-go/config"
 	"github.com/Blue-Frontier/ds-core-go/configupdate"
+	"github.com/Blue-Frontier/ds-core-go/dnsres"
 	"github.com/Blue-Frontier/ds-core-go/proxy"
 )
 
@@ -433,4 +434,3 @@ func ResetRuleText(configPath, host string) string {
 	}
 	return `{"ok":true}`
 }
-
