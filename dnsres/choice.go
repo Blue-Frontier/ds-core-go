@@ -159,4 +159,3 @@ func (c *lru) set(key string, v *ipChoice) {
 		delete(c.m, last.Value.(*lruEntry).key)
 	}
 }
-

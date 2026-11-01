@@ -70,9 +70,13 @@ type Resolver struct {
 	preset    *Provider
 	forSNI    *Provider
 	mapping   []mappingEntry
-	system    *net.Resolver
-	log       *slog.Logger
-	rootCAs   *x509.CertPool
+	// ECH hosts resolve through the provider named by server.dns.ech.dns, as
+	// the desktop's getDNSAndFamily does before falling back to the mapping.
+	echDomains  []string
+	echProvider *Provider
+	system      *net.Resolver
+	log         *slog.Logger
+	rootCAs     *x509.CertPool
 }
 
 type mappingEntry struct {
@@ -122,6 +126,18 @@ func New(s *config.Server, opts ...Option) *Resolver {
 	r.preset = newPreSetProvider(r.presetIdx, r.log)
 	if r.forSNI == nil {
 		r.forSNI = r.preset
+	}
+
+	// ECH hosts use the provider named by server.dns.ech.dns (desktop:
+	// getDNSAndFamily step 2). Only when ECH is switched on for lookups.
+	ech := s.DNS.ECH
+	if ech.Enabled && ech.Use && len(ech.Domains) > 0 {
+		if pr, ok := r.providers[strings.TrimSpace(ech.DNS)]; ok {
+			r.echProvider = pr
+			r.echDomains = append([]string(nil), ech.Domains...)
+		} else if ech.DNS != "" {
+			r.log.Warn("dnsres: ech.dns provider not found", "name", ech.DNS)
+		}
 	}
 
 	// Mapping entries: longest pattern first so specific entries win.
@@ -255,6 +271,15 @@ func (r *Resolver) resolve(ctx context.Context, host string, forSNI bool) ([]net
 			return r.systemLookup(ctx, h)
 		}
 		return r.remainingProvidersAndSystem(ctx, h, route), nil
+	}
+
+	// An ECH host without its own preset address resolves through the ECH
+	// provider first; the desktop does the same (getDNSAndFamily step 2) and it
+	// is what keeps such hosts off a poisoned system resolver.
+	if r.echRouted(h) {
+		if ips := r.viaProvider(ctx, r.echProvider, h, 0); len(ips) > 0 {
+			return ips, nil
+		}
 	}
 
 	if primary != nil {
@@ -451,4 +476,21 @@ func (r *Resolver) systemLookup(ctx context.Context, h string) ([]net.IP, error)
 	}
 	r.log.Debug("dnsres: system DNS", "host", h, "ips", out)
 	return out, nil
+}
+
+// echRouted reports whether host belongs to the ECH domain list and has no
+// preset addresses of its own.
+func (r *Resolver) echRouted(h string) bool {
+	if r == nil || r.echProvider == nil || len(r.echDomains) == 0 {
+		return false
+	}
+	if r.presetIdx.matchList(h) != nil {
+		return false
+	}
+	for _, pattern := range r.echDomains {
+		if hostmatch.Match(pattern, h) {
+			return true
+		}
+	}
+	return false
 }
