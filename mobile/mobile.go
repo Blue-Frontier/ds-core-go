@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,18 +87,27 @@ func resultJSON(r startResult) string {
 	return string(b)
 }
 
+// SetSystemDNS hands the host OS resolvers to the kernel. Android has no
+// resolv.conf, so Go's own resolver cannot discover them.
+//
+//export SetSystemDNS
+func SetSystemDNS(servers string) string {
+	// gobind has no []string parameters, so the list arrives comma separated.
+	var list []string
+	for _, part := range strings.Split(servers, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			list = append(list, part)
+		}
+	}
+	dnsres.SetSystemDNSServers(list)
+	return "ok"
+}
+
 // StartKernel loads config + CA, listens on listenAddr and serves the proxy in
 // the background. Returns JSON `{"handle":N,"error":""}` on success or
 // `{"handle":0,"error":"msg"}` on failure. logFile may be "" to discard.
 //
-// SetSystemDNS hands the host OS resolvers to the kernel. Android has no
-// resolv.conf, so Go's own resolver cannot discover them.
-//
 //export StartKernel
-func SetSystemDNS(servers []string) {
-	dnsres.SetSystemDNSServers(servers)
-}
-
 func StartKernel(configPath, listenAddr, caDir, logFile string) string {
 	mu.Lock()
 	defer mu.Unlock()
