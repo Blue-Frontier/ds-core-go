@@ -44,4 +44,3 @@ func TestChoiceCacheDropsStaleHosts(t *testing.T) {
 		t.Fatalf("stale entry should have been dropped")
 	}
 }
-

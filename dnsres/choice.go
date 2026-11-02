@@ -41,6 +41,20 @@ func newIPChoice(backupList []string) *ipChoice {
 
 // sort returns the candidates in preference order.
 func (c *ipChoice) orderedList() []string {
+	// Addresses that never worked still cost the dial budget: the batch tries
+	// every candidate in parallel, so a dead one burns its full timeout while
+	// the winner waits behind the same deadline. Drop them once there is
+	// enough evidence, unless nothing else is left.
+	alive := make([]string, 0, len(c.order))
+	for _, ip := range c.order {
+		if cnt, ok := c.stats[ip]; ok && cnt.total >= 3 && cnt.successRate == 0 {
+			continue
+		}
+		alive = append(alive, ip)
+	}
+	if len(alive) > 0 {
+		return alive
+	}
 	return append([]string(nil), c.order...)
 }
 
