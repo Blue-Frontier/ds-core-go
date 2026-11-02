@@ -82,6 +82,13 @@ func (e *echState) shared(ctx context.Context, r *dnsres.Resolver) []byte {
 		// copy may still be usable.
 		return bundledShared
 	}
+	// The bundled copy is the same configuration the lookup would return, and a
+	// live lookup on a network that blocks it costs the full DNS deadline on the
+	// connection's path, so it is preferred when present.
+	if len(bundledShared) > 0 {
+		e.store(name, bundledShared)
+		return bundledShared
+	}
 	rec, err := r.LookupHTTPS(ctx, name, e.cfg.DNS)
 	if err == nil && rec != nil && len(rec.ECH) > 0 {
 		e.store(name, rec.ECH)
