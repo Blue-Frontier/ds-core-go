@@ -58,23 +58,42 @@ func (e *echState) list(ctx context.Context, host string, r *dnsres.Resolver) []
 }
 
 // shared resolves the ECHConfigList of the shared public name.
+// bundledShared holds a copy of the shared ECHConfigList. Fetching it needs a
+// resolver that publishes ECH parameters, and on networks that reset TLS for
+// cloudflare-dns.com no such resolver can be reached, so the app pins the value
+// it obtained while a working network was available.
+var bundledShared []byte
+
+// SetBundledSharedECH records the shared ECHConfigList shipped with the app.
+func SetBundledSharedECH(list []byte) {
+	bundledShared = append([]byte(nil), list...)
+}
+
 func (e *echState) shared(ctx context.Context, r *dnsres.Resolver) []byte {
 	name := e.cfg.PublicName
 	if name == "" {
 		return nil
 	}
 	if cached, ok := e.cached(name); ok {
-		return cached
+		if len(cached) > 0 {
+			return cached
+		}
+		// A negative entry only says the record was missing once; the bundled
+		// copy may still be usable.
+		return bundledShared
 	}
 	rec, err := r.LookupHTTPS(ctx, name, e.cfg.DNS)
-	if err != nil || rec == nil || len(rec.ECH) == 0 {
-		// Cache the miss for a short while so a broken lookup does not cost a
-		// DNS round trip on every connection.
-		e.store(name, nil)
-		return nil
+	if err == nil && rec != nil && len(rec.ECH) > 0 {
+		e.store(name, rec.ECH)
+		return rec.ECH
 	}
-	e.store(name, rec.ECH)
-	return rec.ECH
+	if err == nil {
+		// The name answered and publishes no ECH parameter; that verdict may be
+		// cached. A failed lookup says nothing about the record.
+		e.store(name, nil)
+	}
+	// Either way the bundled copy still lets the connection use ECH.
+	return bundledShared
 }
 
 func (e *echState) cached(host string) ([]byte, bool) {

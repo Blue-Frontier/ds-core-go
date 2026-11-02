@@ -11,6 +11,7 @@ import "C"
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -100,6 +101,19 @@ func SetSystemDNS(servers string) string {
 		}
 	}
 	dnsres.SetSystemDNSServers(list)
+	return "ok"
+}
+
+// SetSharedECH takes the base64 encoded shared ECHConfigList shipped with the
+// app. It is the last resort when no resolver can publish ECH parameters.
+//
+//export SetSharedECH
+func SetSharedECH(b64 string) string {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	proxy.SetBundledSharedECH(raw)
 	return "ok"
 }
 
