@@ -77,3 +77,45 @@ func TestInstallReportsDownloadFailure(t *testing.T) {
 		t.Fatalf("got %+v, want error", got)
 	}
 }
+
+// A truncated body that still arrives without a transport error must not be
+// mistaken for the published configuration: the retry has to fetch again and
+// install the complete file.
+func TestInstallRetriesWhenTheBodyIsTruncated(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "remote_config.json5")
+	if err := os.WriteFile(dest, configBytes(1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := configBytes(2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("full") == "" && r.Header.Get("X-Retry") == "" {
+			_, _ = w.Write(want[:len(want)/2])
+			return
+		}
+		_, _ = w.Write(want)
+	}))
+	t.Cleanup(srv.Close)
+
+	calls := 0
+	original := httpFetch
+	t.Cleanup(func() { httpFetch = original })
+	httpFetch = func(url string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return want[:len(want)/2], nil
+		}
+		return want, nil
+	}
+
+	got := Install(srv.URL, dest)
+	if got.Status != "updated" {
+		t.Fatalf("install = %+v, want updated after retry", got)
+	}
+	if calls < 2 {
+		t.Fatalf("calls = %d, want a retry", calls)
+	}
+	if got.Version != 2 {
+		t.Fatalf("version = %d, want 2", got.Version)
+	}
+}

@@ -46,6 +46,12 @@ var httpFetch fetchFunc = func(url string) ([]byte, error) {
 	if len(body) == MaxBytes {
 		return nil, fmt.Errorf("config larger than %d bytes", MaxBytes)
 	}
+	// A dropped connection can end the body early while the client sees no
+	// error, so the declared length is worth checking before the caller trusts
+	// the content.
+	if resp.ContentLength >= 0 && int64(len(body)) != resp.ContentLength {
+		return nil, fmt.Errorf("truncated: got %d of %d bytes", len(body), resp.ContentLength)
+	}
 	return body, nil
 }
 
@@ -78,11 +84,32 @@ func InstallUnversioned(remoteURL, destPath string) Result {
 	return Result{Status: "updated", Version: meta.Version, ID: meta.ID, UpdateLog: meta.UpdateLog}
 }
 
+// downloadAttempts bounds the retries. A transfer on a lossy link can end early
+// without an error, and the published file has been observed to arrive at half
+// its length, so a single attempt silently keeps users on an old config.
+const downloadAttempts = 3
+
 func download(remoteURL string) ([]byte, error) {
 	if remoteURL == "" {
 		return nil, fmt.Errorf("no config url")
 	}
-	return httpFetch(remoteURL)
+	var lastErr error
+	for attempt := 1; attempt <= downloadAttempts; attempt++ {
+		body, err := httpFetch(remoteURL)
+		if err == nil {
+			if _, perr := config.Parse(body); perr != nil {
+				err = fmt.Errorf("parse: %w", perr)
+			}
+		}
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if attempt < downloadAttempts {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	return nil, lastErr
 }
 
 func installBytes(body []byte, destPath string) Result {
