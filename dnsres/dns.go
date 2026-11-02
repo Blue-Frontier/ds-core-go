@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Blue-Frontier/ds-core-go/config"
 	"github.com/Blue-Frontier/ds-core-go/hostmatch"
@@ -120,7 +121,7 @@ func (r *Resolver) FlushChoice() {
 func New(s *config.Server, opts ...Option) *Resolver {
 	r := &Resolver{
 		providers: map[string]*Provider{},
-		system:    net.DefaultResolver,
+		system:    systemResolver(),
 		log:       slog.Default(),
 	}
 	for _, opt := range opts {
@@ -499,6 +500,47 @@ func (r *Resolver) viaProvider(ctx context.Context, p *Provider, h string, famil
 		r.log.Debug("dnsres: resolved", "dns", p.Name, "host", h, "ips", ips)
 	}
 	return ips
+}
+
+// systemDNSServers holds the host OS resolvers, set by the embedding app. Go's
+// resolver reads /etc/resolv.conf, which does not exist on Android, so without
+// this the last-resort lookup fails on every host that has no provider answer.
+var systemDNSServers []string
+
+// SetSystemDNSServers records the DNS servers the host OS is using. It must be
+// called before the resolver is created.
+func SetSystemDNSServers(servers []string) {
+	clean := make([]string, 0, len(servers))
+	for _, s := range servers {
+		if ip := net.ParseIP(s); ip != nil {
+			clean = append(clean, ip.String())
+		}
+	}
+	systemDNSServers = clean
+}
+
+func systemResolver() *net.Resolver {
+	if len(systemDNSServers) == 0 {
+		return net.DefaultResolver
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 3 * time.Second}
+			var lastErr error
+			for _, server := range systemDNSServers {
+				conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(server, "53"))
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("dnsres: no system dns server")
+			}
+			return nil, lastErr
+		},
+	}
 }
 
 func (r *Resolver) systemLookup(ctx context.Context, h string) ([]net.IP, error) {

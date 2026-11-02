@@ -90,7 +90,14 @@ func resultJSON(r startResult) string {
 // the background. Returns JSON `{"handle":N,"error":""}` on success or
 // `{"handle":0,"error":"msg"}` on failure. logFile may be "" to discard.
 //
+// SetSystemDNS hands the host OS resolvers to the kernel. Android has no
+// resolv.conf, so Go's own resolver cannot discover them.
+//
 //export StartKernel
+func SetSystemDNS(servers []string) {
+	dnsres.SetSystemDNSServers(servers)
+}
+
 func StartKernel(configPath, listenAddr, caDir, logFile string) string {
 	mu.Lock()
 	defer mu.Unlock()
