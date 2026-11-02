@@ -73,6 +73,7 @@ type Resolver struct {
 	// ECH hosts resolve through the provider named by server.dns.ech.dns, as
 	// the desktop's getDNSAndFamily does before falling back to the mapping.
 	echDomains  []string
+	echPreSet   []string
 	echProvider *Provider
 	// choice persists per-host IP verdicts across process restarts.
 	choice  *choiceCache
@@ -165,6 +166,7 @@ func New(s *config.Server, opts ...Option) *Resolver {
 		if pr, ok := r.providers[strings.TrimSpace(ech.DNS)]; ok {
 			r.echProvider = pr
 			r.echDomains = append([]string(nil), ech.Domains...)
+			r.echPreSet = append([]string(nil), ech.PreSetIPDomains...)
 		} else if ech.DNS != "" {
 			r.log.Warn("dnsres: ech.dns provider not found", "name", ech.DNS)
 		}
@@ -521,10 +523,23 @@ func (r *Resolver) echRouted(h string) bool {
 	if r == nil || r.echProvider == nil || len(r.echDomains) == 0 {
 		return false
 	}
-	if r.presetIdx.matchList(h) != nil {
+	// A preset address wins only for hosts on the exception list; every other
+	// ECH host is resolved through the ECH provider, as the desktop does.
+	if r.presetIdx.matchList(h) != nil && r.preSetAllowed(h) {
 		return false
 	}
 	for _, pattern := range r.echDomains {
+		if hostmatch.Match(pattern, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// preSetAllowed reports whether host is on ech.preSetIpDomains, the list that
+// keeps preset addresses ahead of the ECH provider.
+func (r *Resolver) preSetAllowed(h string) bool {
+	for _, pattern := range r.echPreSet {
 		if hostmatch.Match(pattern, h) {
 			return true
 		}

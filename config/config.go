@@ -358,7 +358,10 @@ type ECH struct {
 	Use        bool     `json:"use,omitempty"`
 	Domains    []string `json:"domains,omitempty"`
 	PublicName string   `json:"publicName,omitempty"`
-	DNS        string   `json:"dns,omitempty"`
+	// PreSetIPDomains lists ECH hosts that keep using their preset addresses.
+	// Every other ECH host ignores presets, as the desktop documents.
+	PreSetIPDomains []string `json:"preSetIpDomains,omitempty"`
+	DNS             string   `json:"dns,omitempty"`
 }
 
 // SpeedTest is the "IP测速" configuration.
