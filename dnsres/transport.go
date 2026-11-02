@@ -169,7 +169,10 @@ func familyAddr(ctx context.Context, server, port string, family int) (string, e
 		}
 		return hostport, nil
 	}
-	ips, err := net.LookupIP(server)
+	// The bootstrap lookup has to follow the host's own resolvers: on Android
+	// the default resolver has no servers, so a DoH provider named by hostname
+	// could never be reached.
+	ips, err := systemResolver().LookupIP(ctx, "ip", server)
 	if err != nil {
 		return "", err
 	}
