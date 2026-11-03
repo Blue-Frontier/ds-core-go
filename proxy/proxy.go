@@ -976,7 +976,7 @@ func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, sc
 	// Encrypted Client Hello: Go uses the ECHConfigList from the host's HTTPS
 	// record, and ECH requires TLS 1.3. A rejected ECH falls back to a plain
 	// handshake because no rejection callback is installed.
-	if list := s.echConfigList(ctx, host); len(list) > 0 {
+	if list := s.echConfigList(ctx, host); len(list) > 0 && ctx.Value(skipECHKey{}) == nil {
 		cfg.EncryptedClientHelloConfigList = list
 		cfg.MinVersion = tls.VersionTLS13
 		s.Log.Debug("ech enabled", "host", host, "bytes", len(list))
@@ -1027,6 +1027,12 @@ func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, sc
 	}
 	if err := uconn.HandshakeContext(ctx); err != nil {
 		raw.Close()
+		if echRejected(err) && ctx.Value(skipECHKey{}) == nil {
+			// The server answered for the outer name, so it refused the ECH
+			// configuration; a plain handshake is the only way left.
+			s.Log.Debug("ech rejected, retrying without it", "host", host)
+			return s.dialOne(context.WithValue(ctx, skipECHKey{}, true), dialer, host, port, scheme, action, matched, ip)
+		}
 		return nil, err
 	}
 	if !manualVerify {
@@ -1168,4 +1174,13 @@ func responseSize(resp *http.Response, head []byte) int {
 		return int(resp.ContentLength)
 	}
 	return len(head)
+}
+
+// skipECHKey marks a dial that must not offer ECH again.
+type skipECHKey struct{}
+
+// echRejected reports the certificate failure a server produces when it
+// refuses the ECH configuration and answers for the outer name instead.
+func echRejected(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "certificate is valid for")
 }

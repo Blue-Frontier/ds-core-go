@@ -52,9 +52,24 @@ type instance struct {
 	disabled []config.DisabledRule
 }
 
+// applySharedECH hands the pinned shared ECHConfigList from the configuration to
+// the proxy. It travels with the config because fetching it live needs a resolver
+// that some networks reset, and the value rotates.
+func applySharedECH(cfg *config.Config) {
+	if cfg == nil || cfg.Server.DNS.ECH.SharedConfig == "" {
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cfg.Server.DNS.ECH.SharedConfig))
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	proxy.SetBundledSharedECH(raw)
+}
+
 func (i *instance) setLayers(res *config.LoadResult) {
 	i.mu.Lock()
 	i.cfg, i.official, i.personal, i.user = res.Config, res.Official, res.Personal, res.User
+	applySharedECH(res.Config)
 	i.sources = res.Sources
 	i.disabled = res.Disabled
 	i.mu.Unlock()
@@ -161,6 +176,7 @@ func StartKernel(configPath, listenAddr, caDir, logFile string) string {
 		log.Warn("config layer", "warning", w)
 	}
 	cfg := loaded.Config
+	applySharedECH(cfg)
 	if loaded.Personal.ID != "" || loaded.Personal.Version != 0 {
 		log.Info("personal config merged",
 			"id", loaded.Personal.ID, "version", loaded.Personal.Version)

@@ -358,6 +358,10 @@ type ECH struct {
 	Use        bool     `json:"use,omitempty"`
 	Domains    []string `json:"domains,omitempty"`
 	PublicName string   `json:"publicName,omitempty"`
+	// SharedConfig is the base64 ECHConfigList for PublicName, distributed through
+	// the official configuration because fetching it live needs a resolver that
+	// some networks block.
+	SharedConfig string `json:"sharedConfig,omitempty"`
 	// PreSetIPDomains lists ECH hosts that keep using their preset addresses.
 	// Every other ECH host ignores presets, as the desktop documents.
 	PreSetIPDomains []string `json:"preSetIpDomains,omitempty"`
@@ -801,3 +805,4 @@ func quoteBareKeys(b []byte) []byte {
 	}
 	return out
 }
+
