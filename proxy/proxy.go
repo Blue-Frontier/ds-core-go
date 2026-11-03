@@ -1182,5 +1182,13 @@ type skipECHKey struct{}
 // echRejected reports the certificate failure a server produces when it
 // refuses the ECH configuration and answers for the outer name instead.
 func echRejected(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "certificate is valid for")
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// "certificate is valid for <public name>" is what a server answers when it
+	// ignored the ECH configuration; "handshake failure" is what it alerts when
+	// it does not accept that configuration at all.
+	return strings.Contains(msg, "certificate is valid for") ||
+		strings.Contains(msg, "handshake failure")
 }
