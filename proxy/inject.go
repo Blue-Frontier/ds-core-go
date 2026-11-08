@@ -158,7 +158,14 @@ func (s *Server) buildTags(host string, rule config.Rule, nonce string) string {
 // cspWithSelf widens script-src (or script-src-elem) with 'self' so the
 // same-origin injected tags are allowed, prepending the directive when the
 // policy only has default-src.
-func cspWithSelf(policy string) string {
+//
+// A nonce-carrying policy is left alone: the injected tags reuse the page's
+// nonce, and widening to 'self' would also allow every same-origin script,
+// weakening the site's own XSS protection for no benefit.
+func cspWithSelf(policy, nonce string) string {
+	if nonce != "" && cspNonceRe.MatchString(policy) {
+		return policy
+	}
 	loc := cspScriptSrcRe.FindStringSubmatchIndex(policy)
 	if loc == nil {
 		return "script-src 'self'; " + policy
@@ -256,12 +263,16 @@ func (s *Server) maybeInject(host string, req *http.Request, rule config.Rule, r
 		return body
 	}
 
-	nonce := ""
+	nonceValue := ""
 	for _, csp := range resp.Header.Values("Content-Security-Policy") {
 		if n := cspNonce(csp); n != "" {
-			nonce = ` nonce="` + n + `"`
+			nonceValue = n
 			break
 		}
+	}
+	nonce := ""
+	if nonceValue != "" {
+		nonce = ` nonce="` + nonceValue + `"`
 	}
 	tags := s.buildTags(host, rule, nonce)
 	if tags == "" {
@@ -276,7 +287,7 @@ func (s *Server) maybeInject(host string, req *http.Request, rule config.Rule, r
 	if csps := resp.Header.Values("Content-Security-Policy"); len(csps) > 0 {
 		resp.Header.Del("Content-Security-Policy")
 		for _, c := range csps {
-			resp.Header.Add("Content-Security-Policy", cspWithSelf(c))
+			resp.Header.Add("Content-Security-Policy", cspWithSelf(c, nonceValue))
 		}
 	}
 

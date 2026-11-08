@@ -36,7 +36,12 @@ type Rule struct {
 	// always fail.
 	VerifyHost string   `json:"verifyHost,omitempty"`
 	Exclusions []string `json:"exclusions,omitempty"`
-	Desc       string   `json:"desc,omitempty"`
+	// UnVerifySsl is the explicit opt-out from upstream chain verification,
+	// matching the desktop configuration. An SNI override on its own never
+	// disables verification; a rule that cannot present a matching chain has
+	// to say so here (or point VerifyHost at the name the origin does serve).
+	UnVerifySsl Flag   `json:"unVerifySsl,omitempty"`
+	Desc        string `json:"desc,omitempty"`
 
 	// Abort answers the request locally with an error response (403 by default)
 	// instead of contacting the origin.

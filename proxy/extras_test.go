@@ -349,11 +349,26 @@ func TestVerifyHostOverridesChainCheck(t *testing.T) {
 	roots.AddCert(cert)
 	host := hostOf(t, upAddr)
 
-	// The desktop's sni.js swaps in an unverifying agent, so a plain SNI override
-	// never checks the chain: the disguised name cannot match the certificate.
-	t.Run("a plain sni rule does not verify the chain", func(t *testing.T) {
+	// An SNI override is not an opt-out. Without verifyHost or unVerifySsl the
+	// disguised handshake still has to pass the chain check against the host
+	// the user asked for, so this mismatched certificate is rejected.
+	t.Run("a plain sni rule still verifies the chain", func(t *testing.T) {
 		addr, ca, _ := startProxyServer(t, map[string]map[string]config.Rule{
 			host: {".*": {SNI: name}},
+		}, roots, &config.Server{})
+		resp, err := clientFor(addr, ca).Get("https://" + upAddr + "/")
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", resp.StatusCode)
+			}
+		}
+	})
+
+	// unVerifySsl is the explicit opt-out, matching the desktop configuration.
+	t.Run("unVerifySsl skips the chain check", func(t *testing.T) {
+		addr, ca, _ := startProxyServer(t, map[string]map[string]config.Rule{
+			host: {".*": {SNI: name, UnVerifySsl: true}},
 		}, roots, &config.Server{})
 		resp, err := clientFor(addr, ca).Get("https://" + upAddr + "/")
 		if err != nil {
@@ -397,19 +412,34 @@ func TestVerifyHostOverridesChainCheck(t *testing.T) {
 	})
 }
 
-// The stats endpoint is answered by the kernel and must not dial upstream; the
-// host name here does not even resolve.
-func TestStatsEndpointServedLocally(t *testing.T) {
-	addr, _, _ := startProxyServer(t, nil, nil, &config.Server{})
+// The counters are authorisation-gated: a page shares this proxy, so an
+// anonymous /__ds_stats__ would expose every host the user visited.
+func TestStatsEndpointRequiresToken(t *testing.T) {
+	addr, _, srv := startProxyServer(t, nil, nil, &config.Server{})
 
 	proxyURL, _ := url.Parse("http://" + addr)
 	client := &http.Client{
 		Timeout:   5 * time.Second,
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 	}
+
 	resp, err := client.Get("http://stats.invalid/__ds_stats__")
 	if err != nil {
 		t.Fatalf("GET stats: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("without token: status = %d, want 404", resp.StatusCode)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://stats.invalid/__ds_stats__", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-DS-Stats-Token", srv.StatsToken())
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("GET stats with token: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)

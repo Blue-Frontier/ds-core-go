@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net"
@@ -62,6 +63,12 @@ func (h *h2Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// The kernel's own endpoints answer before any rule, as on the h1 path.
 	if path == statsPath {
+		authorized := req.Method == http.MethodGet && s.statsToken != "" &&
+			subtle.ConstantTimeCompare([]byte(req.Header.Get(statsTokenHeader)), []byte(s.statsToken)) == 1
+		if !authorized {
+			http.NotFound(w, req)
+			return
+		}
 		body := s.statsPayload()
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -141,7 +148,8 @@ func (h *h2Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		out.RequestURI = ""
 	}
 
-	insecure := s.st().insecure[strings.ToLower(net.JoinHostPort(dstHost, h.port))]
+	insecure := s.st().insecure[strings.ToLower(net.JoinHostPort(dstHost, h.port))] ||
+		(matched && bool(action.Rule.UnVerifySsl))
 	key := upstreamKey(dstHost, h.port, h.scheme, action, matched, insecure)
 
 	var upstream net.Conn

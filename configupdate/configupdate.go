@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -29,9 +30,27 @@ type Result struct {
 
 type fetchFunc func(url string) ([]byte, error)
 
-var httpFetch fetchFunc = func(url string) ([]byte, error) {
-	cl := &http.Client{Timeout: 20 * time.Second}
-	resp, err := cl.Get(url)
+var httpFetch fetchFunc = func(rawURL string) ([]byte, error) {
+	// The configuration carries rules and scripts that run inside pages, so a
+	// plain-http fetch would hand that control to anyone on the path. Redirects
+	// are held to the same scheme.
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("config url must be https: %s", rawURL)
+	}
+	cl := &http.Client{
+		Timeout: 20 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("refusing redirect to %s", req.URL.Scheme)
+			}
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+	resp, err := cl.Get(rawURL)
 	if err != nil {
 		return nil, err
 	}

@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +15,11 @@ import (
 // statsPath is answered by the kernel itself so counters can be read without
 // attaching a debugger. It never touches the network.
 const statsPath = "/__ds_stats__"
+
+// statsTokenHeader carries the per-process token that authorises the endpoint.
+// A page shares this proxy, so an unauthenticated endpoint would hand the
+// browsing history to any site that fetches its own /__ds_stats__.
+const statsTokenHeader = "X-DS-Stats-Token"
 
 // statsPayload is the JSON the stats endpoint returns, shared by both protocols.
 // It adds the live keep-alive pool counters so reuse is observable without a
@@ -31,10 +38,18 @@ func (s *Server) statsPayload() string {
 	return string(out)
 }
 
-// serveStats answers statsPath locally.
-func (s *Server) serveStats(conn net.Conn, path string) bool {
-	if path != statsPath {
+// serveStats answers statsPath locally for a caller that presents this
+// process's token. Anything else gets a 404, so a page probing its own origin
+// cannot even tell the endpoint exists.
+func (s *Server) serveStats(conn net.Conn, req *http.Request) bool {
+	if req.URL == nil || req.URL.Path != statsPath {
 		return false
+	}
+	authorized := req.Method == http.MethodGet && s.statsToken != "" &&
+		subtle.ConstantTimeCompare([]byte(req.Header.Get(statsTokenHeader)), []byte(s.statsToken)) == 1
+	if !authorized {
+		fmt.Fprintf(conn, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+		return true
 	}
 	body := s.statsPayload()
 	fmt.Fprintf(conn,

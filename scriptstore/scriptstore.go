@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -45,16 +46,35 @@ func New(fetch Fetcher) *Store {
 	}
 }
 
-// DefaultFetch downloads a script over plain HTTP(S).
-func DefaultFetch(url string) ([]byte, error) {
-	cl := &http.Client{Timeout: 15 * time.Second}
-	resp, err := cl.Get(url)
+// DefaultFetch downloads a script over HTTPS only.
+//
+// The body is injected into the page's own origin, so a plain-http fetch would
+// let anyone on the path rewrite it into an XSS payload. Redirects are held to
+// the same rule: an https URL must not bounce to http.
+func DefaultFetch(rawURL string) ([]byte, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("scriptstore: %s: only https URLs are allowed", rawURL)
+	}
+	cl := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("scriptstore: refusing redirect to %s", req.URL.Scheme)
+			}
+			if len(via) >= 5 {
+				return errors.New("scriptstore: too many redirects")
+			}
+			return nil
+		},
+	}
+	resp, err := cl.Get(rawURL)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("scriptstore: %s: status %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("scriptstore: %s: status %d", rawURL, resp.StatusCode)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, MaxScriptBytes+1))
 	if err != nil {

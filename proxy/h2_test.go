@@ -122,10 +122,13 @@ func TestH2AbortRule(t *testing.T) {
 	}
 }
 
-// The kernel's own stats endpoint answers over HTTP/2 too, without dialing.
+// The kernel's own stats endpoint answers over HTTP/2 too, without dialing,
+// but only for a caller that holds the process token.
 func TestH2StatsEndpoint(t *testing.T) {
-	addr, ca := startProxy(t, nil, nil)
-	resp, err := h2Client(t, addr, ca.RootPool()).RoundTrip(mustRequest(t, "https://stats.invalid/__ds_stats__"))
+	addr, ca, srv := startProxyServer(t, nil, nil, &config.Server{})
+	req := mustRequest(t, "https://stats.invalid/__ds_stats__")
+	req.Header.Set("X-DS-Stats-Token", srv.StatsToken())
+	resp, err := h2Client(t, addr, ca.RootPool()).RoundTrip(req)
 	if err != nil {
 		t.Fatalf("h2 stats: %v", err)
 	}

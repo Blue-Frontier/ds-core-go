@@ -12,8 +12,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	utls "github.com/refraction-networking/utls"
@@ -61,6 +63,10 @@ type Server struct {
 
 	// pool keeps upstream sockets alive between requests.
 	pool *connPool
+
+	// statsToken authorises the debug counter endpoint. It never reaches the
+	// page (or the proxy configuration), so a site cannot read the counters.
+	statsToken string
 
 	// presetMu guards the "preset addresses are dead" memory.
 	presetMu   sync.Mutex
@@ -298,6 +304,11 @@ func New(cfg *config.Config, ca *certcache.Authority, log *slog.Logger) (*Server
 		DialTimeout: 8 * time.Second,
 		pool:        newConnPool(),
 	}
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		return nil, err
+	}
+	srv.statsToken = hex.EncodeToString(token)
 	srv.state.Store(st)
 	srv.startCF(st)
 
@@ -307,6 +318,10 @@ func New(cfg *config.Config, ca *certcache.Authority, log *slog.Logger) (*Server
 	}
 	return srv, nil
 }
+
+// StatsToken is the header value the debug counter endpoint requires. The app
+// keeps it in memory for tests; it is deliberately not exposed over the proxy.
+func (s *Server) StatsToken() string { return s.statsToken }
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -445,7 +460,7 @@ func (s *Server) serveOne(conn net.Conn, br *bufio.Reader, req *http.Request, ho
 
 	// Injected scripts are served from the kernel itself, under the page's own
 	// origin, so the page CSP only has to allow 'self'.
-	if s.serveStats(conn, path) {
+	if s.serveStats(conn, req) {
 		return nil
 	}
 	if s.serveScript(conn, path) {
@@ -536,7 +551,8 @@ func (s *Server) serveOne(conn net.Conn, br *bufio.Reader, req *http.Request, ho
 		out.Header.Set("Accept-Encoding", "gzip, deflate")
 	}
 
-	insecure := s.st().insecure[strings.ToLower(net.JoinHostPort(dstHost, port))]
+	insecure := s.st().insecure[strings.ToLower(net.JoinHostPort(dstHost, port))] ||
+		(matched && bool(action.Rule.UnVerifySsl))
 	key := upstreamKey(dstHost, port, scheme, action, matched, insecure)
 
 	var upstream net.Conn
@@ -959,7 +975,8 @@ func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, sc
 			verifyHost = vh
 		}
 	}
-	insecure := s.st().insecure[strings.ToLower(net.JoinHostPort(host, port))]
+	insecure := s.st().insecure[strings.ToLower(net.JoinHostPort(host, port))] ||
+		(matched && bool(action.Rule.UnVerifySsl))
 
 	minVersion, verify := s.upstreamTLS(host)
 	cfg := &utls.Config{
@@ -984,16 +1001,15 @@ func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, sc
 	manualVerify := false
 	switch {
 	case insecure:
-		cfg.InsecureSkipVerify = true
-	case sni != "" && action.Rule.Proxy == "":
-		// A disguised SNI cannot match the origin certificate, and the desktop's
-		// sni.js switches to an unverifying agent for exactly this case. Without
-		// that, every "sni: baidu.com" rule would fail its chain check.
-		cfg.ServerName = sni
+		// Only an explicit "unVerifySsl" on the matched rule turns verification
+		// off, exactly like the desktop's configuration semantics.
 		cfg.InsecureSkipVerify = true
 	case sni != "" || verifyHost != host:
-		// A proxy rule keeps verification, but against the target the origin
-		// actually serves (verifyHost, defaulting to that target).
+		// A disguised SNI (or a rewritten verification target) makes the
+		// presented certificate name differ from the handshake name, so the
+		// standard check cannot run. The chain is still verified by hand
+		// against verifyHost, which defaults to the host the user asked for.
+		// Having an SNI field alone is not a reason to trust anything.
 		if sni != "" {
 			cfg.ServerName = sni
 		}

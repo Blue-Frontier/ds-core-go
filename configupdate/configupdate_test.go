@@ -2,10 +2,12 @@ package configupdate
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,14 +22,27 @@ func configBytes(version int) []byte {
 	return []byte(fmt.Sprintf(cfgVersioned, version, version))
 }
 
-func serve(t *testing.T, version int) *httptest.Server {
+// fetchFrom serves handler over TLS and rewires the download transport to it.
+// The returned URL keeps the https scheme so Install's own scheme guard runs;
+// only the certificate plumbing of the test server is bypassed.
+func fetchFrom(t *testing.T, handler func(*http.Request) []byte) string {
 	t.Helper()
-	body := configBytes(version)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(body)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(handler(r))
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+
+	original := httpFetch
+	t.Cleanup(func() { httpFetch = original })
+	httpFetch = func(u string) ([]byte, error) {
+		resp, err := srv.Client().Get(u)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		return io.ReadAll(resp.Body)
+	}
+	return strings.Replace(srv.URL, "http://", "https://", 1)
 }
 
 func TestInstallUpdatesOlderFileAndThenReportsCurrent(t *testing.T) {
@@ -36,8 +51,8 @@ func TestInstallUpdatesOlderFileAndThenReportsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := serve(t, 2)
-	got := Install(srv.URL, dest)
+	url := fetchFrom(t, func(*http.Request) []byte { return configBytes(2) })
+	got := Install(url, dest)
 	if got.Status != "updated" {
 		t.Fatalf("first install = %+v, want updated", got)
 	}
@@ -45,7 +60,7 @@ func TestInstallUpdatesOlderFileAndThenReportsCurrent(t *testing.T) {
 		t.Fatalf("version = %d", got.Version)
 	}
 
-	again := Install(srv.URL, dest)
+	again := Install(url, dest)
 	if again.Status != "current" {
 		t.Fatalf("second install = %+v, want current", again)
 	}
@@ -56,12 +71,11 @@ func TestInstallRefusesUnversionedRemote(t *testing.T) {
 	if err := os.WriteFile(dest, configBytes(5), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"server":{"intercepts":{}}}`))
-	}))
-	defer srv.Close()
 
-	got := Install(srv.URL, dest)
+	url := fetchFrom(t, func(*http.Request) []byte {
+		return []byte(`{"server":{"intercepts":{}}}`)
+	})
+	got := Install(url, dest)
 	if got.Status != "error" {
 		t.Fatalf("got %+v, want error", got)
 	}
@@ -72,6 +86,7 @@ func TestInstallRefusesUnversionedRemote(t *testing.T) {
 
 func TestInstallReportsDownloadFailure(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "remote_config.json5")
+	// Plain http is refused before any attempt is made.
 	got := Install("http://127.0.0.1:1/nope", dest)
 	if got.Status != "error" {
 		t.Fatalf("got %+v, want error", got)
@@ -88,27 +103,16 @@ func TestInstallRetriesWhenTheBodyIsTruncated(t *testing.T) {
 	}
 
 	want := configBytes(2)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("full") == "" && r.Header.Get("X-Retry") == "" {
-			_, _ = w.Write(want[:len(want)/2])
-			return
-		}
-		_, _ = w.Write(want)
-	}))
-	t.Cleanup(srv.Close)
-
 	calls := 0
-	original := httpFetch
-	t.Cleanup(func() { httpFetch = original })
-	httpFetch = func(url string) ([]byte, error) {
+	url := fetchFrom(t, func(*http.Request) []byte {
 		calls++
 		if calls == 1 {
-			return want[:len(want)/2], nil
+			return want[:len(want)/2]
 		}
-		return want, nil
-	}
+		return want
+	})
 
-	got := Install(srv.URL, dest)
+	got := Install(url, dest)
 	if got.Status != "updated" {
 		t.Fatalf("install = %+v, want updated after retry", got)
 	}

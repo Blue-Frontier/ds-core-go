@@ -7,9 +7,10 @@ import (
 
 func TestCSPWithSelf(t *testing.T) {
 	cases := []struct {
-		name string
-		in   string
-		want string
+		name  string
+		in    string
+		nonce string
+		want  string
 	}{
 		{
 			name: "adds self to existing script-src",
@@ -31,11 +32,17 @@ func TestCSPWithSelf(t *testing.T) {
 			in:   "script-src-elem cdn.example.com; img-src 'self'",
 			want: "script-src-elem 'self' cdn.example.com; img-src 'self'",
 		},
+		{
+			name:  "a nonce policy is not widened",
+			in:    "script-src 'nonce-abc123' 'strict-dynamic'",
+			nonce: "abc123",
+			want:  "script-src 'nonce-abc123' 'strict-dynamic'",
+		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := cspWithSelf(c.in)
+			got := cspWithSelf(c.in, c.nonce)
 			if got != c.want {
 				t.Fatalf("cspWithSelf(%q) = %q, want %q", c.in, got, c.want)
 			}

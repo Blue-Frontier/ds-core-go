@@ -201,7 +201,7 @@ func TestStatsExposePool(t *testing.T) {
 	host, _, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 	roots := x509.NewCertPool()
 	roots.AddCert(upstream.Certificate())
-	addr, ca := startProxy(t, map[string]map[string]config.Rule{host: {".*": {}}}, roots)
+	addr, ca, srv := startProxyServer(t, map[string]map[string]config.Rule{host: {".*": {}}}, roots, &config.Server{})
 
 	client := clientFor(addr, ca)
 	for i := 0; i < 2; i++ {
@@ -213,7 +213,12 @@ func TestStatsExposePool(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	statsResp, err := client.Get("http://" + host + ":1/__ds_stats__")
+	req, err := http.NewRequest(http.MethodGet, "http://"+host+":1/__ds_stats__", nil)
+	if err != nil {
+		t.Fatalf("stats request: %v", err)
+	}
+	req.Header.Set("X-DS-Stats-Token", srv.StatsToken())
+	statsResp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
