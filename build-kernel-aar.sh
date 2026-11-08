@@ -12,6 +12,7 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+native_dir() { case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) cygpath -m "$1" ;; *) printf '%s' "$1" ;; esac; }
 cd "$HERE"
 
 TARGETS=("$@")
@@ -45,6 +46,33 @@ if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
 fi
 export ANDROID_NDK="$ANDROID_NDK_HOME"
 echo "NDK=$ANDROID_NDK_HOME"
+
+# Offline module resolution: kernel/goproxy is a file:// module proxy holding
+# exactly the modules this build needs. F-Droid builds without a network, and
+# a vendor/ tree is not an option: Go would switch to -mod=vendor and gomobile
+# cannot find its own package there.
+if [[ -d "$HERE/goproxy" ]]; then
+    _proxy_dir=$(native_dir "$HERE/goproxy")
+    case "$_proxy_dir" in /*) GOPROXY="file://$_proxy_dir" ;; *) GOPROXY="file:///$_proxy_dir" ;; esac
+    export GOPROXY
+    export GOFLAGS="${GOFLAGS:--mod=mod}"
+    export GOSUMDB=off
+    echo "GOPROXY=$GOPROXY"
+fi
+
+# gomobile has to exist before bind runs; install it from the proxy when it is
+# not on PATH (the version is pinned in go.mod).
+if ! command -v gomobile >/dev/null; then
+    ver=$(awk '/golang.org\/x\/mobile v/ {print $2}' go.mod | head -1)
+    if [[ -z "$ver" ]]; then echo "golang.org/x/mobile version not found in go.mod" >&2; exit 1; fi
+    echo "installing gomobile $ver"
+    GOFLAGS="${GOFLAGS:--mod=mod}" go install "golang.org/x/mobile/cmd/gomobile@$ver"
+    # gomobile shells out to gobind, which is a separate main package.
+    GOFLAGS="${GOFLAGS:--mod=mod}" go install "golang.org/x/mobile/cmd/gobind@$ver"
+    gopath=$(go env GOPATH)
+    case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) gopath=$(cygpath -u "$gopath") ;; esac
+    export PATH="$gopath/bin:$PATH"
+fi
 
 # A fresh clone has no build/ (it is git-ignored) and gomobile will not create
 # the output file's parent directory.
