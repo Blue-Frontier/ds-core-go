@@ -29,7 +29,14 @@ fi
 
 # gomobile shells out to javac when it generates the Java bindings, so JAVA_HOME
 # has to be on PATH as well.
-if [[ -n "${JAVA_HOME:-}" ]]; then export PATH="$JAVA_HOME/bin:$PATH"; fi
+if [[ -n "${JAVA_HOME:-}" ]]; then
+    case "$(uname -s)" in
+        # MSYS needs the POSIX form on PATH, gomobile execs javac directly.
+        MINGW* | MSYS* | CYGWIN*) JAVA_HOME=$(cygpath -u "$JAVA_HOME") ;;
+    esac
+    export JAVA_HOME
+    export PATH="$JAVA_HOME/bin:$PATH"
+fi
 
 if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
     NDK=$(find "$ANDROID_HOME/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | tail -1)
