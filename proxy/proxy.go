@@ -1004,6 +1004,14 @@ func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, sc
 		// Only an explicit "unVerifySsl" on the matched rule turns verification
 		// off, exactly like the desktop's configuration semantics.
 		cfg.InsecureSkipVerify = true
+		// A rule may ask for both: skip verification and still disguise the
+		// handshake name. Without this the disguise was dropped whenever
+		// unVerifySsl was set, so sites that the network resets by name (the
+		// duckduckgo rule sets sni: baidu.com plus unVerifySsl) never got the
+		// disguised ClientHello and stayed unreachable.
+		if sni != "" {
+			cfg.ServerName = sni
+		}
 	case sni != "" || verifyHost != host:
 		// A disguised SNI (or a rewritten verification target) makes the
 		// presented certificate name differ from the handshake name, so the
