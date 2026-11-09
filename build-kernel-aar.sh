@@ -47,6 +47,11 @@ fi
 export ANDROID_NDK="$ANDROID_NDK_HOME"
 echo "NDK=$ANDROID_NDK_HOME"
 
+# Paths inside the binary are what breaks a rebuild elsewhere: without these
+# flags libgojni.so embeds the checkout directory and the module cache, so a
+# build in another directory (F-Droid uses /home/...) is never byte-identical.
+export GOFLAGS="${GOFLAGS:-} -mod=mod -trimpath -buildvcs=false"
+
 # Offline module resolution: kernel/goproxy is a file:// module proxy holding
 # exactly the modules this build needs. F-Droid builds without a network, and
 # a vendor/ tree is not an option: Go would switch to -mod=vendor and gomobile
@@ -55,7 +60,6 @@ if [[ -d "$HERE/goproxy" ]]; then
     _proxy_dir=$(native_dir "$HERE/goproxy")
     case "$_proxy_dir" in /*) GOPROXY="file://$_proxy_dir" ;; *) GOPROXY="file:///$_proxy_dir" ;; esac
     export GOPROXY
-    export GOFLAGS="${GOFLAGS:--mod=mod}"
     export GOSUMDB=off
     echo "GOPROXY=$GOPROXY"
 fi
@@ -66,9 +70,9 @@ if ! command -v gomobile >/dev/null; then
     ver=$(awk '/golang.org\/x\/mobile v/ {print $2}' go.mod | head -1)
     if [[ -z "$ver" ]]; then echo "golang.org/x/mobile version not found in go.mod" >&2; exit 1; fi
     echo "installing gomobile $ver"
-    GOFLAGS="${GOFLAGS:--mod=mod}" go install "golang.org/x/mobile/cmd/gomobile@$ver"
+    go install "golang.org/x/mobile/cmd/gomobile@$ver"
     # gomobile shells out to gobind, which is a separate main package.
-    GOFLAGS="${GOFLAGS:--mod=mod}" go install "golang.org/x/mobile/cmd/gobind@$ver"
+    go install "golang.org/x/mobile/cmd/gobind@$ver"
     gopath=$(go env GOPATH)
     case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) gopath=$(cygpath -u "$gopath") ;; esac
     export PATH="$gopath/bin:$PATH"
@@ -84,7 +88,7 @@ for t in "${TARGETS[@]}"; do
     name=${name//[^A-Za-z0-9]/-}
     part="build/kernel-$name.aar"
     echo "gomobile bind -target=$t"
-    gomobile bind "-target=$t" -androidapi=35 -o "$part" ./mobile
+    gomobile bind "-target=$t" -androidapi=35 -ldflags="-s -w" -o "$part" ./mobile
     PARTS+=("$part")
 done
 
