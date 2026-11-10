@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -340,6 +341,60 @@ func tlsServerForName(t *testing.T, dnsName string) (string, *x509.Certificate) 
 	return ln.Addr().String(), cert
 }
 
+// tlsServerForNameOnlySNI completes the handshake only when the client sends
+// exactly dnsName. A rule that silently drops its SNI override therefore fails
+// here instead of quietly reaching the origin under the original name.
+func tlsServerForNameOnlySNI(t *testing.T, dnsName string) (string, *x509.Certificate) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	tpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: dnsName},
+		DNSNames:              []string{dnsName},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("cert: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	served := &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	hs := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "verifyok")
+		}),
+		TLSConfig: &tls.Config{
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				if hello.ServerName != dnsName {
+					return nil, fmt.Errorf("client sent sni %q, want %q", hello.ServerName, dnsName)
+				}
+				return served, nil
+			},
+		},
+	}
+	go func() { _ = hs.ServeTLS(ln, "", "") }()
+	t.Cleanup(func() { _ = hs.Close() })
+
+	return ln.Addr().String(), cert
+}
+
 // verifyHost declares which name the origin chain must match, which is what
 // SNI-swapping rules need.
 func TestVerifyHostOverridesChainCheck(t *testing.T) {
@@ -378,6 +433,28 @@ func TestVerifyHostOverridesChainCheck(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK || string(body) != "verifyok" {
 			t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+		}
+	})
+
+	// unVerifySsl and the disguise are separate settings: turning verification
+	// off must not drop the name. This origin refuses any handshake that does
+	// not carry the disguised name, which is what the network does to a site it
+	// recognises by name. Before the two were composed independently, the first
+	// matching field won and duckduckgo.com kept sending its real name.
+	t.Run("unVerifySsl keeps the disguised name", func(t *testing.T) {
+		strictAddr, strictCert := tlsServerForNameOnlySNI(t, name)
+		strictRoots := x509.NewCertPool()
+		strictRoots.AddCert(strictCert)
+		addr, ca, _ := startProxyServer(t, map[string]map[string]config.Rule{
+			hostOf(t, strictAddr): {".*": {SNI: name, UnVerifySsl: true}},
+		}, strictRoots, &config.Server{})
+		resp, err := clientFor(addr, ca).Get("https://" + strictAddr + "/")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
 	})
 

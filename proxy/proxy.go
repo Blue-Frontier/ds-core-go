@@ -985,44 +985,40 @@ func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, sc
 		MinVersion: minVersion,
 		NextProtos: []string{"http/1.1"},
 	}
-	if !verify {
-		// "server.setting.verifySsl = false" turns verification off upstream,
-		// as the desktop's createHttpsAgent does.
-		cfg.InsecureSkipVerify = true
-	}
-	// Encrypted Client Hello: Go uses the ECHConfigList from the host's HTTPS
-	// record, and ECH requires TLS 1.3. A rejected ECH falls back to a plain
-	// handshake because no rejection callback is installed.
-	if list := s.echConfigList(ctx, host); len(list) > 0 && ctx.Value(skipECHKey{}) == nil {
+
+	// A rule is a set of independent switches, not a choice between them: a site
+	// may be reached under a disguised name, verified against a different host,
+	// and have verification turned off, in any combination. This was a switch,
+	// so the first match silently dropped the rest — duckduckgo asks for a
+	// disguise and unVerifySsl together and only ever got the second.
+	if sni != "" {
+		// The origin is addressed under another name. ECH would publish this
+		// host in the outer ClientHello instead, which is the opposite of what a
+		// disguise is for, so the two are not combined.
+		cfg.ServerName = sni
+	} else if list := s.echConfigList(ctx, host); len(list) > 0 && ctx.Value(skipECHKey{}) == nil {
+		// Go uses the ECHConfigList from the host's HTTPS record, and ECH needs
+		// TLS 1.3. A rejected ECH falls back to a plain handshake because no
+		// rejection callback is installed.
 		cfg.EncryptedClientHelloConfigList = list
 		cfg.MinVersion = tls.VersionTLS13
 		s.Log.Debug("ech enabled", "host", host, "bytes", len(list))
 	}
-	manualVerify := false
-	switch {
-	case insecure:
-		// Only an explicit "unVerifySsl" on the matched rule turns verification
-		// off, exactly like the desktop's configuration semantics.
+
+	// Disguising the name, or verifying against another host, makes the
+	// presented certificate name differ from the handshake name, so the standard
+	// check cannot run. The chain is still verified by hand against verifyHost,
+	// which defaults to the host the user asked for: having an SNI field alone is
+	// not a reason to trust anything.
+	manualVerify := sni != "" || verifyHost != host
+	if manualVerify {
 		cfg.InsecureSkipVerify = true
-		// A rule may ask for both: skip verification and still disguise the
-		// handshake name. Without this the disguise was dropped whenever
-		// unVerifySsl was set, so sites that the network resets by name (the
-		// duckduckgo rule sets sni: baidu.com plus unVerifySsl) never got the
-		// disguised ClientHello and stayed unreachable.
-		if sni != "" {
-			cfg.ServerName = sni
-		}
-	case sni != "" || verifyHost != host:
-		// A disguised SNI (or a rewritten verification target) makes the
-		// presented certificate name differ from the handshake name, so the
-		// standard check cannot run. The chain is still verified by hand
-		// against verifyHost, which defaults to the host the user asked for.
-		// Having an SNI field alone is not a reason to trust anything.
-		if sni != "" {
-			cfg.ServerName = sni
-		}
+	}
+	// Turning verification off is a separate request, and it wins: no chain
+	// check at all, manual or otherwise.
+	if insecure || !verify {
 		cfg.InsecureSkipVerify = true
-		manualVerify = true
+		manualVerify = false
 	}
 
 	// A browser user agent over a Go TLS handshake is exactly the mismatch
