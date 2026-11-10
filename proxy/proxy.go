@@ -991,18 +991,23 @@ func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, sc
 	// and have verification turned off, in any combination. This was a switch,
 	// so the first match silently dropped the rest — duckduckgo asks for a
 	// disguise and unVerifySsl together and only ever got the second.
-	if sni != "" {
-		// The origin is addressed under another name. ECH would publish this
-		// host in the outer ClientHello instead, which is the opposite of what a
-		// disguise is for, so the two are not combined.
-		cfg.ServerName = sni
-	} else if list := s.echConfigList(ctx, host); len(list) > 0 && ctx.Value(skipECHKey{}) == nil {
+
+	// Encrypted Client Hello hides the destination inside the handshake, which
+	// subsumes a disguise: the outer name has to be the ECH public name, so an
+	// available ECH configuration wins and a configured sni is ignored.
+	ech := false
+	if list := s.echConfigList(ctx, host); len(list) > 0 && ctx.Value(skipECHKey{}) == nil {
 		// Go uses the ECHConfigList from the host's HTTPS record, and ECH needs
 		// TLS 1.3. A rejected ECH falls back to a plain handshake because no
 		// rejection callback is installed.
 		cfg.EncryptedClientHelloConfigList = list
 		cfg.MinVersion = tls.VersionTLS13
+		ech = true
 		s.Log.Debug("ech enabled", "host", host, "bytes", len(list))
+	}
+	disguise := sni != "" && !ech
+	if disguise {
+		cfg.ServerName = sni
 	}
 
 	// Disguising the name, or verifying against another host, makes the
@@ -1010,7 +1015,7 @@ func (s *Server) dialOne(ctx context.Context, dialer *net.Dialer, host, port, sc
 	// check cannot run. The chain is still verified by hand against verifyHost,
 	// which defaults to the host the user asked for: having an SNI field alone is
 	// not a reason to trust anything.
-	manualVerify := sni != "" || verifyHost != host
+	manualVerify := disguise || verifyHost != host
 	if manualVerify {
 		cfg.InsecureSkipVerify = true
 	}
