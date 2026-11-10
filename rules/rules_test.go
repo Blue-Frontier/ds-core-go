@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Blue-Frontier/ds-core-go/config"
@@ -273,5 +274,40 @@ func TestRegexHostKey(t *testing.T) {
 	}
 	if a, ok := tbl.Match("www.googleapis.com", "/x"); !ok || a.Rule.SNI != "regex" {
 		t.Fatalf("regex host did not match: %+v ok=%v", a.Rule, ok)
+	}
+}
+
+// A rule can only produce one response, so declaring several local ones leaves
+// the rest unreachable. That is a configuration mistake worth reporting when the
+// rules load, not something to discover from a request that "does nothing".
+func TestConflictingLocalResponsesAreReported(t *testing.T) {
+	tbl, err := Compile(map[string]map[string]config.Rule{
+		"two.example": {
+			".*": {Success: &config.Synthetic{HTML: "ok"}, Abort: &config.Synthetic{HTML: "no"}},
+		},
+		"three.example": {
+			".*": {
+				Success:  &config.Synthetic{HTML: "ok"},
+				Abort:    &config.Synthetic{HTML: "no"},
+				Redirect: "ghp.ci/https://example.com",
+			},
+		},
+		"one.example": {
+			".*": {Redirect: "ghp.ci/https://example.com"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(tbl.Conflicts) != 2 {
+		t.Fatalf("Conflicts = %v, want the two multi-response rules", tbl.Conflicts)
+	}
+	for _, c := range tbl.Conflicts {
+		if strings.Contains(c, "one.example") {
+			t.Fatalf("a single response must not be reported: %q", c)
+		}
+	}
+	if !strings.Contains(tbl.Conflicts[0], "success") || !strings.Contains(tbl.Conflicts[0], "abort") {
+		t.Fatalf("conflict should name the declared responses: %q", tbl.Conflicts[0])
 	}
 }

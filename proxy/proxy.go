@@ -198,6 +198,9 @@ func (s *Server) Reload(cfg *config.Config) error {
 	if skipped := st.table.Skipped; len(skipped) > 0 {
 		s.Log.Warn("rules skipped (regex unsupported by RE2)", "count", len(skipped), "first", skipped[0])
 	}
+	if c := st.table.Conflicts; len(c) > 0 {
+		s.Log.Warn("rules declare more than one local response; only the first applies", "count", len(c), "first", c[0])
+	}
 	return nil
 }
 
@@ -290,6 +293,9 @@ func New(cfg *config.Config, ca *certcache.Authority, log *slog.Logger) (*Server
 	}
 	if skipped := st.table.Skipped; len(skipped) > 0 {
 		log.Warn("rules skipped (regex unsupported by RE2)", "count", len(skipped), "first", skipped[0])
+	}
+	if c := st.table.Conflicts; len(c) > 0 {
+		log.Warn("rules declare more than one local response; only the first applies", "count", len(c), "first", c[0])
 	}
 
 	srv := &Server{

@@ -56,6 +56,28 @@ type Table struct {
 	// Skipped lists patterns the Go regexp engine still cannot compile after
 	// rewriting; they are ignored rather than failing the whole configuration.
 	Skipped []string
+	// Conflicts lists rules that declare more than one local response. Only one
+	// response can be sent, so the rest are unreachable; reporting them at load
+	// time beats a configuration that looks like it does something it cannot.
+	Conflicts []string
+}
+
+// localResponders lists the local responses a rule declares, in the order the
+// request path applies them: success and abort answer before redirect does.
+// More than one is a configuration mistake — a request only gets one response —
+// so the loader reports it rather than silently applying the first.
+func localResponders(r config.Rule) []string {
+	var out []string
+	if r.Success != nil {
+		out = append(out, "success")
+	}
+	if r.Abort != nil {
+		out = append(out, "abort")
+	}
+	if r.Redirect != "" {
+		out = append(out, "redirect")
+	}
+	return out
 }
 
 // normalizePathPattern mirrors the desktop's isMatched(): "*", ".*" and "true"
@@ -216,6 +238,9 @@ func Compile(intercepts map[string]map[string]config.Rule) (*Table, error) {
 				// refusing to load a configuration whose other rules are fine.
 				t.Skipped = append(t.Skipped, host+" "+p)
 				continue
+			}
+			if names := localResponders(rule); len(names) > 1 {
+				t.Conflicts = append(t.Conflicts, host+" "+p+": "+strings.Join(names, "/"))
 			}
 			cr := compiledRule{pattern: p, re: re, rule: rule}
 			skip := false
