@@ -1118,7 +1118,43 @@ func (s *Server) resolve(ctx context.Context, host string, action rules.Action, 
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("resolve %s: no addresses", host)
 	}
+	// The providers are DoH/DoT endpoints, and a network that filters them tends
+	// to hand back stale edges: on a phone, the configured resolver returned an
+	// address that never answered while the device's own resolver had one that
+	// connected. Those answers are appended as extra race candidates rather than
+	// replacing the configured ones — a poisoned answer cannot win, because the
+	// handshake is still verified against the host the user asked for.
+	ips = appendSystemIPs(ctx, s.Log, host, ips)
 	return ips, nil
+}
+
+// appendSystemIPs merges what the platform resolver knows into the candidates,
+// keeping the configured answers first. Bounded and best-effort: a slow or
+// unavailable resolver must not delay the request.
+func appendSystemIPs(ctx context.Context, log *slog.Logger, host string, ips []net.IP) []net.IP {
+	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(sctx, host)
+	if err != nil || len(addrs) == 0 {
+		return ips
+	}
+	seen := make(map[string]bool, len(ips)+len(addrs))
+	for _, ip := range ips {
+		seen[ip.String()] = true
+	}
+	added := 0
+	for _, a := range addrs {
+		if seen[a.IP.String()] {
+			continue
+		}
+		ips = append(ips, a.IP)
+		seen[a.IP.String()] = true
+		added++
+	}
+	if added > 0 && log != nil {
+		log.Debug("dns candidates extended by the system resolver", "host", host, "added", added)
+	}
+	return ips
 }
 
 func (s *Server) writeError(conn net.Conn, code int, err error) error {
