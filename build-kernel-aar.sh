@@ -59,6 +59,13 @@ export GOFLAGS="${GOFLAGS:-} -mod=mod -trimpath -buildvcs=false"
 if [[ -d "$HERE/goproxy" ]]; then
     _proxy_dir=$(native_dir "$HERE/goproxy")
     case "$_proxy_dir" in /*) GOPROXY="file://$_proxy_dir" ;; *) GOPROXY="file:///$_proxy_dir" ;; esac
+    # A dependency added since the proxy was last refreshed would otherwise stop
+    # the build outright. CI has a network and sets DS_ALLOW_NET=1, so it keeps
+    # working while the proxy catches up; the F-Droid recipe never sets it, so
+    # that build stays entirely local and still fails loudly.
+    if [[ -n "${DS_ALLOW_NET:-}" ]]; then
+        GOPROXY="$GOPROXY,https://proxy.golang.org,direct"
+    fi
     export GOPROXY
     export GOSUMDB=off
     echo "GOPROXY=$GOPROXY"
