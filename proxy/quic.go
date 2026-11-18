@@ -22,6 +22,33 @@ import (
 // errNoQuicCandidate means the name resolved to nothing usable.
 var errNoQuicCandidate = errors.New("quic: no candidate address")
 
+// quicFailFor is how long a host is left on the TCP path after an HTTP/3
+// attempt failed. Without it a user who opted in on a network that filters UDP
+// would pay the handshake timeout on every single request.
+const quicFailFor = 5 * time.Minute
+
+// quicRecentlyFailed reports whether host is still inside its cool-off window.
+func (s *Server) quicRecentlyFailed(host string) bool {
+	s.quicMu.Lock()
+	defer s.quicMu.Unlock()
+	at, ok := s.quicFail[host]
+	return ok && time.Since(at) < quicFailFor
+}
+
+// noteQuicResult records a failure, or clears the record when it worked.
+func (s *Server) noteQuicResult(host string, err error) {
+	s.quicMu.Lock()
+	defer s.quicMu.Unlock()
+	if s.quicFail == nil {
+		s.quicFail = make(map[string]time.Time)
+	}
+	if err == nil {
+		delete(s.quicFail, host)
+		return
+	}
+	s.quicFail[host] = time.Now()
+}
+
 // quicState is the compiled form of "server.setting.quicUpstream".
 type quicState struct {
 	enabled bool
@@ -157,6 +184,7 @@ func (s *Server) serveQUIC(
 	hreq.RequestURI = ""
 
 	resp, err := s.quicTransport(insecure).RoundTrip(hreq)
+	s.noteQuicResult(host, err)
 	if err != nil {
 		s.Log.Debug("quic upstream failed, falling back", "host", host, "err", err)
 		return false, nil
@@ -246,6 +274,7 @@ func (s *Server) serveQUICH2(
 	hreq.RequestURI = ""
 
 	resp, err := s.quicTransport(insecure).RoundTrip(hreq)
+	s.noteQuicResult(host, err)
 	if err != nil {
 		s.Log.Debug("quic upstream failed over h2, falling back", "host", host, "err", err)
 		return false

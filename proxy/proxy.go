@@ -46,8 +46,9 @@ var errClose = errors.New("connection closed")
 // Server serves the proxy protocol.
 type Server struct {
 	// quicMu guards the lazily created HTTP/3 transport.
-	quicMu sync.Mutex
-	quicTr *http3.Transport
+	quicMu   sync.Mutex
+	quicTr   *http3.Transport
+	quicFail map[string]time.Time
 
 	CA  *certcache.Authority
 	Log *slog.Logger
@@ -574,7 +575,7 @@ func (s *Server) serveOne(conn net.Conn, br *bufio.Reader, req *http.Request, ho
 	// A reset TCP+TLS handshake is what an HTTP/3 upstream exists for. When the
 	// host is opted in, try it first: if it fails, nothing has been written to
 	// the client yet and the code below proceeds exactly as it did before.
-	if s.st().quic.allows(dstHost) {
+	if s.st().quic.allows(dstHost) && !s.quicRecentlyFailed(dstHost) {
 		if done, qerr := s.serveQUIC(conn, req, out, host, action, matched, reqActions, download, insecure, started); done {
 			return qerr
 		}

@@ -153,7 +153,7 @@ func (h *h2Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// The WebView negotiates h2 with the kernel, so this is the path that
 	// actually carries its requests; the HTTP/3 upstream has to be offered here
 	// too, or the opt-in would only ever apply to HTTP/1.1 clients.
-	if s.st().quic.allows(dstHost) {
+	if s.st().quic.allows(dstHost) && !s.quicRecentlyFailed(dstHost) {
 		if s.serveQUICH2(w, req, out, host, action, matched, reqActions, download, insecure, start) {
 			return
 		}
