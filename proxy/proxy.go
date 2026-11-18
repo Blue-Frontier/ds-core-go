@@ -1113,6 +1113,11 @@ func tlsStateOf(s utls.ConnectionState) tls.ConnectionState {
 
 // resolve runs the DNS selection for an upstream dial.
 func (s *Server) resolve(ctx context.Context, host string, action rules.Action, matched bool) ([]net.IP, error) {
+	// A literal address is already the answer; asking a resolver about it turns
+	// a working request into "no usable address" for no reason.
+	if ip := net.ParseIP(hostmatch.Normalize(host)); ip != nil {
+		return []net.IP{ip}, nil
+	}
 	sniRule := matched && strings.TrimSpace(action.Rule.SNI) != ""
 	if sniRule && !s.st().dns.HasDNS(host) {
 		ips, err := s.st().dns.LookupForSNI(ctx, host)

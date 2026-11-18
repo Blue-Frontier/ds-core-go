@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +18,9 @@ import (
 	"github.com/Blue-Frontier/ds-core-go/hostmatch"
 	"github.com/Blue-Frontier/ds-core-go/rules"
 )
+
+// errNoQuicCandidate means the name resolved to nothing usable.
+var errNoQuicCandidate = errors.New("quic: no candidate address")
 
 // quicState is the compiled form of "server.setting.quicUpstream".
 type quicState struct {
@@ -44,6 +48,33 @@ func (q quicState) allows(host string) bool {
 	return false
 }
 
+// quicCandidatesKey carries the addresses the kernel resolved for a host into
+// Transport.Dial. Without it http3 resolves the name itself, and on a network
+// that poisons DNS it then dials an address that answers nothing — which is
+// exactly how the first device test failed.
+type quicCandidatesKey struct{}
+
+func withQuicCandidates(ctx context.Context, ips []net.IP) context.Context {
+	if len(ips) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, quicCandidatesKey{}, ips)
+}
+
+// quicCandidates resolves host the same way the TCP path does, so both
+// transports agree on where a name points.
+func (s *Server) quicCandidates(ctx context.Context, host string, action rules.Action, matched bool) []net.IP {
+	if ip := net.ParseIP(hostmatch.Normalize(host)); ip != nil {
+		return []net.IP{ip}
+	}
+	ips, err := s.resolve(ctx, host, action, matched)
+	if err != nil {
+		s.Log.Debug("quic resolve failed", "host", host, "err", err)
+		return nil
+	}
+	return ips
+}
+
 // quicTransport returns the shared HTTP/3 transport, creating it once.
 //
 // The transport is process-wide on purpose: a QUIC connection is expensive to
@@ -65,6 +96,32 @@ func (s *Server) quicTransport(insecure bool) *http3.Transport {
 			HandshakeIdleTimeout: 5 * time.Second,
 			MaxIdleTimeout:       30 * time.Second,
 		},
+	}
+	s.quicTr.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+		ips, _ := ctx.Value(quicCandidatesKey{}).([]net.IP)
+		if len(ips) == 0 {
+			return quic.DialAddr(ctx, addr, tlsCfg, cfg)
+		}
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		// The certificate still has to be checked against the name the client
+		// asked for, not against the address that was dialed.
+		cfgTLS := tlsCfg.Clone()
+		cfgTLS.ServerName = host
+		var last error
+		for _, ip := range ips {
+			conn, derr := quic.DialAddr(ctx, net.JoinHostPort(ip.String(), port), cfgTLS, cfg)
+			if derr == nil {
+				return conn, nil
+			}
+			last = derr
+		}
+		if last == nil {
+			last = errNoQuicCandidate
+		}
+		return nil, last
 	}
 	return s.quicTr
 }
@@ -88,6 +145,10 @@ func (s *Server) serveQUIC(
 ) (bool, error) {
 	ctx, cancel := context.WithTimeout(req.Context(), s.requestTimeout(host))
 	defer cancel()
+
+	// The transport must dial the addresses the kernel resolved, not whatever
+	// the platform resolver returns for this name.
+	ctx = withQuicCandidates(ctx, s.quicCandidates(ctx, host, action, matched))
 
 	// RoundTrip needs an absolute https URL and no RequestURI; the tunnel-built
 	// request already has both, but the body must be readable exactly once.
@@ -177,6 +238,8 @@ func (s *Server) serveQUICH2(
 ) bool {
 	ctx, cancel := context.WithTimeout(req.Context(), s.requestTimeout(host))
 	defer cancel()
+
+	ctx = withQuicCandidates(ctx, s.quicCandidates(ctx, host, action, matched))
 
 	hreq := out.Clone(ctx)
 	hreq.URL.Scheme = "https"
