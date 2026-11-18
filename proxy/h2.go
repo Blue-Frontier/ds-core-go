@@ -150,6 +150,15 @@ func (h *h2Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	insecure := s.st().insecure[strings.ToLower(net.JoinHostPort(dstHost, h.port))] ||
 		(matched && bool(action.Rule.UnVerifySsl))
+	// The WebView negotiates h2 with the kernel, so this is the path that
+	// actually carries its requests; the HTTP/3 upstream has to be offered here
+	// too, or the opt-in would only ever apply to HTTP/1.1 clients.
+	if s.st().quic.allows(dstHost) {
+		if s.serveQUICH2(w, req, out, host, action, matched, reqActions, download, insecure, start) {
+			return
+		}
+	}
+
 	key := upstreamKey(dstHost, h.port, h.scheme, action, matched, insecure)
 
 	var upstream net.Conn

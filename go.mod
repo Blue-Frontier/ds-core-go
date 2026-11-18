@@ -12,6 +12,8 @@ require (
 require (
 	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
+	github.com/quic-go/quic-go v0.65.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/mobile v0.0.0-20261011034528-197770444867 // indirect
 	golang.org/x/mod v0.42.0 // indirect

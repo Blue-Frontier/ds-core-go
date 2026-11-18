@@ -500,6 +500,18 @@ type Setting struct {
 	LowSpeedDelay int `json:"lowSpeedDelay,omitempty"`
 	// Script gates the request/response scripting middleware.
 	Script ScriptSetting `json:"script,omitempty"`
+	// QuicUpstream carries a request over HTTP/3 when the TCP+TLS path is
+	// reset by name. Hosts lists the patterns it applies to; with no hosts the
+	// feature stays off, which is the default.
+	QuicUpstream QuicSetting `json:"quicUpstream,omitempty"`
+}
+
+// QuicSetting configures the HTTP/3 upstream. It stays off unless a host list is
+// given: this is a second path to the same origin, so it should be enabled where
+// it was measured to help rather than everywhere.
+type QuicSetting struct {
+	Enabled Flag       `json:"enabled,omitempty"`
+	Hosts   StringList `json:"hosts,omitempty"`
 }
 
 // HostTimeout is one entry of "server.setting.timeoutMapping".

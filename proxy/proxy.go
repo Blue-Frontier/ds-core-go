@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/quic-go/quic-go/http3"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +45,10 @@ var errClose = errors.New("connection closed")
 
 // Server serves the proxy protocol.
 type Server struct {
+	// quicMu guards the lazily created HTTP/3 transport.
+	quicMu sync.Mutex
+	quicTr *http3.Transport
+
 	CA  *certcache.Authority
 	Log *slog.Logger
 
@@ -100,6 +106,8 @@ type state struct {
 	tlsVersions map[string]uint16
 	// scriptEnabled gates the injection middleware ("server.setting.script").
 	scriptEnabled bool
+	// quic holds the HTTP/3 upstream setting ("server.setting.quicUpstream").
+	quic quicState
 }
 
 func (s *Server) st() *state { return s.state.Load() }
@@ -179,6 +187,7 @@ func buildState(cfg *config.Config, scripts *scriptstore.Store, log *slog.Logger
 		verifySsl:        cfg.Server.Setting.VerifySsl == nil || *cfg.Server.Setting.VerifySsl,
 		tlsVersions:      tlsVersionMap(cfg.Server.Setting.TLSVersionMapping),
 		scriptEnabled:    cfg.Server.Setting.Script.EnabledOrDefault(),
+		quic:             newQuicState(cfg.Server.Setting.QuicUpstream),
 	}, nil
 }
 
@@ -293,6 +302,9 @@ func New(cfg *config.Config, ca *certcache.Authority, log *slog.Logger) (*Server
 	}
 	if skipped := st.table.Skipped; len(skipped) > 0 {
 		log.Warn("rules skipped (regex unsupported by RE2)", "count", len(skipped), "first", skipped[0])
+	}
+	if st.quic.enabled {
+		log.Info("quic upstream enabled", "hosts", strings.Join(st.quic.hosts, ","))
 	}
 	if c := st.table.Conflicts; len(c) > 0 {
 		log.Warn("rules declare more than one local response; only the first applies", "count", len(c), "first", c[0])
@@ -559,6 +571,15 @@ func (s *Server) serveOne(conn net.Conn, br *bufio.Reader, req *http.Request, ho
 
 	insecure := s.st().insecure[strings.ToLower(net.JoinHostPort(dstHost, port))] ||
 		(matched && bool(action.Rule.UnVerifySsl))
+	// A reset TCP+TLS handshake is what an HTTP/3 upstream exists for. When the
+	// host is opted in, try it first: if it fails, nothing has been written to
+	// the client yet and the code below proceeds exactly as it did before.
+	if s.st().quic.allows(dstHost) {
+		if done, qerr := s.serveQUIC(conn, req, out, host, action, matched, reqActions, download, insecure, started); done {
+			return qerr
+		}
+	}
+
 	key := upstreamKey(dstHost, port, scheme, action, matched, insecure)
 
 	var upstream net.Conn
